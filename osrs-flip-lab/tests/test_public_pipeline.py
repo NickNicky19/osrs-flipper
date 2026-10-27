@@ -344,12 +344,18 @@ class PublicPipelineTests(unittest.TestCase):
         obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']
         self.assertTrue(compatible_model(model))
         for field,mutation in [('metrics',lambda m:m['metrics']['holdout'].update(candidate_price_mae_bps=0)),
-                               ('samples',lambda m:m['samples'].update(train=1))]:
+                               ('samples',lambda m:m['samples'].update(train=1)),
+                               ('missing_metrics',lambda m:m.pop('metrics'))]:
             altered=copy.deepcopy(model);mutation(altered)
             with self.subTest(field=field):
                 self.assertFalse(compatible_model(altered))
                 self.assertIn('MODEL_SCHEMA_OR_CHECKSUM',promotion_gate(altered,None,None)['reasons'])
                 with self.assertRaises(ValueError):predict(altered,[0,0,0,0])
+        broken=copy.deepcopy(model);broken.pop('metrics');broken['status']='RESEARCH_ACTIVE'
+        state=new_state(max(x['received_at'] for x in obs));state['models']=[broken]
+        state['active_model_id']=broken['id'];state['source_status']='CAPTURED_WITH_REVIEW'
+        self.assertEqual(daily_readiness(state,state['created_at']+86400),'RULES_BASELINE')
+        self.assertIsNone(state['active_model_id'])
 
     def test_verified_deployment_clock_allows_bounded_shadow_replay(self):
         obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']

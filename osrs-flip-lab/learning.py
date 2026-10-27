@@ -434,7 +434,8 @@ def promotion_gate(model, shadow, portfolio):
     """One predeclared look per frozen candidate. No threshold or risk retuning."""
     reasons = []
     if not compatible_model(model):
-        reasons.append('MODEL_SCHEMA_OR_CHECKSUM')
+        return dict(pass_all=False,reasons=['MODEL_SCHEMA_OR_CHECKSUM'],
+                    thresholds=PROMOTION.copy(),note='Corrupt or incompatible model cannot be promoted.')
     holdout = model['metrics']['holdout']
     if holdout['candidate_price_mae_bps'] > holdout['baseline_price_mae_bps'] * (1 - PROMOTION['min_heldout_improvement_bps'] / 10000):
         reasons.append('HELDOUT_FORECAST')
@@ -483,13 +484,19 @@ def daily_readiness(state, now):
         state['learning_status'] = 'PAUSED'
         state['learning_reason'] = dict(status='PAUSED',reason='COMPUTE_BUDGET')
         return 'PAUSED'
+    corrupt_detected=False
     for model in state['models']:
         if model.get('status') in ('SHADOW','RESEARCH_ACTIVE') and not compatible_model(model):
             model['status']='CORRUPT_OR_INCOMPATIBLE'
+            corrupt_detected=True
             if state.get('active_model_id')==model.get('id'):
                 state['active_model_id']=None
             state['learning_reason']=dict(status='PAUSED',reason='MODEL_SCHEMA_OR_CHECKSUM')
-    previous = state['models'][-1]['data_cutoff'] if state['models'] else 0
+    if corrupt_detected:
+        state['learning_status']='ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'RULES_BASELINE'
+        return state['learning_status']
+    previous = max((m.get('data_cutoff',0) for m in state['models']
+                    if type(m.get('data_cutoff')) is int),default=0)
     if any(m['status'] == 'SHADOW' for m in state['models']):
         state['shadow_metrics'] = shadow_metrics(state, now)
         state['portfolio_shadow_comparison'] = shadow_portfolio_comparison(state, now)

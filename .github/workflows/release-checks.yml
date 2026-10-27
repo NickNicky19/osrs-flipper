@@ -1,0 +1,31 @@
+name: Release checks
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run Workbench and public pipeline tests
+        run: cd osrs-flip-lab && python3 -m unittest discover -s tests -v
+      - name: Validate public placeholder and privacy boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          body=json.loads(Path('site/data.json').read_text(encoding='utf-8'))
+          assert body['schema']=='osrs-public-site-1'
+          assert body['source_status']=='DATA_UNAVAILABLE'
+          assert body['top_picks']==[]
+          assert body['learning']['status']=='DATA_INSUFFICIENT'
+          assert not {'recorded_account_state','account_hash','journal','rsn'} & body.keys()
+          PY

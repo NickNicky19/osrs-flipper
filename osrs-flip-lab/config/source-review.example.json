@@ -1,0 +1,10 @@
+{
+  "api_version": "v1",
+  "bucket_timestamp": "start",
+  "reviewed": false,
+  "reviewed_at": 0,
+  "expires_at": 0,
+  "permission_reference": "",
+  "semantics_reference": "",
+  "user_agent": "OSRS-Flip-Lab/0.3 (replace with your project/contact before collection)"
+}

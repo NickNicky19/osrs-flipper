@@ -1,0 +1,13 @@
+{
+  "label": "SYNTHETIC DEMONSTRATION — not OSRS prices or recommendations",
+  "as_of": 1767225600,
+  "interval_seconds": 300,
+  "items": [
+    {"item_id": 900001, "name": "Demo supply A", "low": 10000, "high": 10300, "low_time": 1767225580, "high_time": 1767225570, "low_units": 120000, "high_units": 100000, "tax_exempt": false, "illustrative_limit": 5000},
+    {"item_id": 900002, "name": "Demo exempt item B", "low": 580, "high": 590, "low_time": 1767225590, "high_time": 1767225580, "low_units": 150000, "high_units": 200000, "tax_exempt": true, "illustrative_limit": 10000},
+    {"item_id": 900003, "name": "Demo material C", "low": 230, "high": 240, "low_time": 1767225570, "high_time": 1767225560, "low_units": 180000, "high_units": 240000, "tax_exempt": false, "illustrative_limit": 10000},
+    {"item_id": 900004, "name": "Demo resource D", "low": 155, "high": 162, "low_time": 1767225560, "high_time": 1767225550, "low_units": 400000, "high_units": 500000, "tax_exempt": false, "illustrative_limit": 20000},
+    {"item_id": 900005, "name": "Demo stale quote — excluded", "low": 1000, "high": 1100, "low_time": 1767220000, "high_time": 1767225590, "low_units": 100000, "high_units": 100000, "tax_exempt": false, "illustrative_limit": 1000},
+    {"item_id": 900006, "name": "Demo negative net — excluded", "low": 10000, "high": 10100, "low_time": 1767225590, "high_time": 1767225590, "low_units": 100000, "high_units": 100000, "tax_exempt": false, "illustrative_limit": 1000}
+  ]
+}

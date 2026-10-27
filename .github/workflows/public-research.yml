@@ -1,0 +1,140 @@
+name: Public paper research and Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/public-research.yml'
+      - 'osrs-flip-lab/**'
+      - 'site/**'
+  workflow_dispatch:
+  schedule:
+    # Five-minute minimum, offset from the busy top of the hour. GitHub may delay/drop.
+    - cron: '2/5 * * * *'
+
+concurrency:
+  group: osrs-public-paper-writer
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      pick_ids: ${{ steps.pick-ids.outputs.ids }}
+      state_sha: ${{ steps.cycle.outputs.state_sha }}
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout durable public data branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: paper-data
+          path: durable
+      - name: Verify application on source changes
+        if: github.event_name != 'schedule'
+        run: cd osrs-flip-lab && python3 -m unittest discover -s tests -v
+      - name: Collect, track, learn when ready, and export
+        id: cycle
+        env:
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 osrs-flip-lab/public_pipeline.py cycle \
+            --state durable/state.json \
+            --archive-dir durable/archive \
+            --raw-dir raw-evidence \
+            --output site/data.json \
+            --run-id "$RUN_ID" | tee cycle-receipt.json
+          python3 - <<'PY'
+          import json, os
+          body=json.load(open('cycle-receipt.json',encoding='utf-8'))
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as out:
+              out.write('state_sha='+body['state_sha256']+'\n')
+              out.write('raw_evidence_due='+str(body.get('raw_evidence_due',False)).lower()+'\n')
+          PY
+      - name: Retain bounded raw public source evidence
+        if: always() && (steps.cycle.outputs.raw_evidence_due == 'true' || steps.cycle.outcome == 'failure')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: raw-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Record IDs issued before publication
+        id: pick-ids
+        run: |
+          python3 - <<'PY'
+          import json, os
+          state=json.load(open('durable/state.json',encoding='utf-8'))
+          ids=','.join(state['active_pick_ids'])
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as out:
+              out.write('ids='+ids+'\n')
+          PY
+      - name: Commit durable public state and history
+        run: |
+          git -C durable config user.name 'osrs-flipper-paper-bot'
+          git -C durable config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C durable add -A
+          if ! git -C durable diff --cached --quiet; then
+            git -C durable commit -m "paper: cycle ${{ github.run_id }}"
+            git -C durable push origin HEAD:paper-data
+          fi
+      - name: Upload static site
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: site
+
+  deploy:
+    needs: research
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy static public site
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+  acknowledge-publication:
+    needs: [research, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout latest durable state
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: paper-data
+          path: durable
+      - name: Acknowledge only a successful deployment
+        env:
+          PICK_IDS: ${{ needs.research.outputs.pick_ids }}
+          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+          DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 osrs-flip-lab/public_pipeline.py publish \
+            --state durable/state.json \
+            --pick-ids "$PICK_IDS" \
+            --deployment-id "$DEPLOYMENT_ID" \
+            --deployment-url "$PAGE_URL" | tee publication-receipt.json
+          git -C durable config user.name 'osrs-flipper-paper-bot'
+          git -C durable config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C durable add state.json
+          if ! git -C durable diff --cached --quiet; then
+            git -C durable commit -m "paper: acknowledge Pages $DEPLOYMENT_ID"
+            git -C durable push origin HEAD:paper-data
+          fi

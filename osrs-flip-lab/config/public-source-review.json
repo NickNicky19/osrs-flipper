@@ -1,0 +1,18 @@
+{
+  "api_version": "v1",
+  "route_versions": {
+    "mapping": "v2",
+    "latest": "v2",
+    "5m": "v2",
+    "1h": "v2",
+    "24h": "v2",
+    "timeseries": "v2"
+  },
+  "bucket_timestamp": "start",
+  "reviewed": true,
+  "reviewed_at": 1793132577,
+  "expires_at": 1795724577,
+  "permission_reference": "https://runelite.net/blog/show/2021-03-08-Wiki-Ge-Partnership/ ; https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices",
+  "semantics_reference": "https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices ; live route receipts 2026-10-27 in source evidence",
+  "user_agent": "osrs-flipper/0.4 (+https://github.com/NickNicky19/osrs-flipper)"
+}

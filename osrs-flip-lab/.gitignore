@@ -1,0 +1,7 @@
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+config/*.local.json
+config/item-rules.local.json
+private-exports/

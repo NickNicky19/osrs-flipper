@@ -1,0 +1,13 @@
+{
+  "assumptions": {"capital": 10000, "publication_delay": 300, "action_delay": 300, "collection_delay": 300},
+  "plans": [{"id": "fixture-plan", "item_id": 1, "issued_at": 1000,
+    "entry_deadline": 2400, "exit_deadline": 3000, "buy": 100, "sell": 120,
+    "quantity": 10, "public_limit": 10, "tax_exempt": false,
+    "limit_group_status": "VERIFIED_ITEM_ONLY"}],
+  "bars": [
+    {"item_id": 1, "bucket_start": 1800, "received_at": 2100, "low_avg": 100, "high_avg": 110, "low_units": 50, "high_units": 50},
+    {"item_id": 1, "bucket_start": 2100, "received_at": 2400, "low_avg": 100, "high_avg": 120, "low_units": 50, "high_units": 50},
+    {"item_id": 1, "bucket_start": 2400, "received_at": 2700, "low_avg": 110, "high_avg": 120, "low_units": 50, "high_units": 50},
+    {"item_id": 1, "bucket_start": 2700, "received_at": 3000, "low_avg": 110, "high_avg": 120, "low_units": 50, "high_units": 50}
+  ]
+}

@@ -17,6 +17,12 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run Workbench and public pipeline tests
         run: cd osrs-flip-lab && python3 -m unittest discover -s tests -v
+      - name: Check browser modules and local planning/journal regressions
+        run: |
+          node --check site/app.js
+          node --check site/personal-ui.mjs
+          node --check site/journal-db.mjs
+          node --test site/tests/*.test.mjs
       - name: Validate public placeholder and privacy boundary
         run: |
           python3 - <<'PY'

@@ -8,6 +8,7 @@
     "24h": "v2",
     "timeseries": "v2"
   },
+  "minimum_item_counts": {"mapping": 3000, "latest": 2500, "5m": 500, "1h": 1500, "24h": 2500},
   "bucket_timestamp": "start",
   "reviewed": true,
   "reviewed_at": 1793132577,

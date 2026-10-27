@@ -1,10 +1,12 @@
 {
-  "version": "public-rules-1",
+  "version": "public-rules-2",
   "reviewed_at": "2026-10-27",
   "valid_until": "2026-11-26",
   "tax_reference": "https://secure.runescape.com/m=news/yama-cas--more?oldschool=1",
   "exemptions_reference": "https://oldschool.runescape.wiki/w/Grand_Exchange#Exempt_from_tax",
+  "exemption_category_reference": "https://oldschool.runescape.wiki/w/Category:Items_exempt_from_Grand_Exchange_tax",
   "limit_reference": "https://oldschool.runescape.wiki/w/Grand_Exchange/Buying_limits",
+  "general_ordinary_rule": "OSRS Wiki GE mapping tradeable item with a known public limit, excluding the reviewed exemption and special-mechanic registries; newly placed ordinary offers use 2% floor-rounded per unit with a 5m GP per-item cap",
   "ordinary_ids": [
     314, 383, 453, 554, 555, 556, 562, 566, 205, 442, 2359, 2440,
     2970, 2998, 4151, 5295, 5300, 6737, 7936, 8780, 9242, 10034,
@@ -13,5 +15,10 @@
     27232, 27616, 29580, 29801
   ],
   "exempt_ids": [],
-  "note": "Conservative reviewed subset. Unlisted items remain visible in the full screener with TAX_RULE_UNREVIEWED. Public limit is not personal remaining allowance. New 2% offers only; old grandfathered offers stay private/manual."
+  "exempt_registry": {
+    "233":"Pestle and mortar", "315":"Shrimps", "329":"Salmon", "347":"Herring", "351":"Pike", "355":"Mackerel", "361":"Tuna", "365":"Bass", "379":"Lobster", "558":"Mind rune", "806":"Bronze dart", "807":"Iron dart", "808":"Steel dart", "882":"Bronze arrow", "884":"Iron arrow", "886":"Steel arrow", "952":"Spade", "1733":"Needle", "1735":"Shears", "1755":"Chisel", "1785":"Glassblowing pipe", "1891":"Cake", "2140":"Cooked chicken", "2142":"Cooked meat", "2309":"Bread", "2327":"Meat pie", "2347":"Hammer", "2552":"Ring of dueling(8)", "3008":"Energy potion(4)", "3010":"Energy potion(3)", "3012":"Energy potion(2)", "3014":"Energy potion(1)", "3853":"Games necklace(8)", "5325":"Gardening trowel", "5329":"Secateurs", "5331":"Watering can", "5341":"Rake", "5343":"Seed dibber", "8007":"Varrock teleport (tablet)", "8008":"Lumbridge teleport (tablet)", "8009":"Falador teleport (tablet)", "8010":"Camelot teleport (tablet)", "8011":"Ardougne teleport (tablet)", "8013":"Teleport to house (tablet)", "8794":"Saw", "13190":"Old school bond", "28790":"Kourend castle teleport (tablet)", "28824":"Civitas illa fortis teleport"
+  },
+  "special_exclusions": {"13190":"Old school bond conversion mechanics are outside the ordinary same-item flip model"},
+  "verified_item_only_registry": {},
+  "note": "General ordinary tax is supported by Jagex's 2025 update and the Wiki GE exemption list; the ID/name registry prevents an item variant from silently inheriting an exemption. Unknown/mismatched IDs and limits remain excluded. Existing baseline IDs and issued picks remain frozen; the broader pool is research input, not a retrospectively improved baseline. Public limits are not personal remaining allowances."
 }

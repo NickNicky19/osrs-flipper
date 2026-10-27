@@ -71,6 +71,7 @@ class SourceContract:
     semantics_reference: str = ''
     user_agent: str = ''
     route_versions: dict | None = None
+    minimum_item_counts: dict | None = None
 
     @classmethod
     def from_dict(cls, value):
@@ -85,6 +86,11 @@ class SourceContract:
                 raise ValidationError('Invalid route-version registry.')
             if any(v not in ('v1', 'v2') for v in result.route_versions.values()):
                 raise ValidationError('Invalid route version.')
+        if result.minimum_item_counts is not None:
+            if (not isinstance(result.minimum_item_counts,dict) or
+                    not set(result.minimum_item_counts) <= KINDS or
+                    any(type(v) is not int or v<1 or v>100000 for v in result.minimum_item_counts.values())):
+                raise ValidationError('Invalid route minimum item counts.')
         if type(result.reviewed) is not bool:
             raise ValidationError('Source review must be a boolean.')
         integer(result.reviewed_at, 'Review timestamp')
@@ -109,6 +115,8 @@ class SourceContract:
         result = asdict(self)
         if result['route_versions'] is None:
             del result['route_versions']
+        if result['minimum_item_counts'] is None:
+            del result['minimum_item_counts']
         return result
 
     def version_for(self, kind):

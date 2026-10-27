@@ -1,6 +1,7 @@
 "use strict";
 import {SnapshotPoller} from "./refresh.mjs?v=completion-v3-3";
 import {initPersonalUI,renderPersonalUI} from "./personal-ui.mjs?v=completion-v3-3";
+import {matchingReceipt,publishedAt,currentPlanEligible} from "./publication.mjs?v=completion-v3-4";
 const $ = id => document.getElementById(id);
 const gp = value => value === null || value === undefined ? "UNKNOWN" : Number(value).toLocaleString("en-US") + " GP";
 const number = value => value === null || value === undefined ? "UNKNOWN" : Number(value).toLocaleString("en-US");
@@ -12,17 +13,18 @@ let payload, fetchError=null, currentReceipt=null, selectedGraphId=null;
 const snapshotFresh = data => {const now=Date.now()/1000;return !fetchError&&
   data.source_status==="CAPTURED_WITH_REVIEW"&&data.generated_at&&now>=data.generated_at&&now-data.generated_at<=600&&
   data.source_success_at&&now>=data.source_success_at&&now-data.source_success_at<=600;};
+const displayFresh = data => snapshotFresh(data)&&!!matchingReceipt(data,currentReceipt);
 const currentPicks = (data, now, fresh) => fresh ? (data.top_picks || []).filter(p =>
-  p.issued_at<=now&&p.observed_low_time<=now&&p.observed_high_time<=now&&
-  p.expires_at > now && p.observed_low_time+300 > now && p.observed_high_time+300 > now) : [];
+  currentPlanEligible(data,p,currentReceipt,now)) : [];
 
 function renderStatus(data) {
   const now = Date.now()/1000;
-  const fresh = snapshotFresh(data);
+  const sourceFresh=snapshotFresh(data),fresh=displayFresh(data);
   const badge = $("live-status");
   badge.className = "status " + (fresh ? "status-good" : "status-bad");
-  badge.textContent = fresh ? "SOURCE FRESH · PAPER ONLY" :
-    "HISTORICAL SNAPSHOT · CURRENT PLANS UNAVAILABLE";
+  badge.textContent = fresh ? "SOURCE FRESH · PUBLICATION VERIFIED · PAPER ONLY" :
+    (sourceFresh ? "PUBLICATION RECEIPT PENDING · CURRENT PLANS UNAVAILABLE" :
+      "HISTORICAL SNAPSHOT · CURRENT PLANS UNAVAILABLE");
   const box = $("portfolio"); box.replaceChildren();
   add(box,"div","eyebrow","SIMULATED PORTFOLIO");
   add(box,"div","big",gp(data.bankroll));
@@ -57,7 +59,7 @@ function renderPicks(data, fresh) {
      ["Break-even sell",gp(p.break_even_sell)], ["Assumed quantity",number(p.quantity_assumption)],
      ["Required shared cash",gp(p.required_cash)], ["Per-unit sale tax",gp(p.tax_per_unit)]].forEach(pair => {const cell=add(grid,"div");add(cell,"span",null,pair[0]);add(cell,"strong",null,pair[1]);});
     add(card,"p","fine","Observed instant-sell side: "+date(p.observed_low_time)+" ("+Math.max(0,Math.floor(now-p.observed_low_time))+"s old) · instant-buy side: "+date(p.observed_high_time)+" ("+Math.max(0,Math.floor(now-p.observed_high_time))+"s old)");
-    add(card,"p","fine","Review horizon: "+number(p.horizon_seconds/60)+" minutes · Published: "+date(p.first_public_at));
+    add(card,"p","fine","Review horizon: "+number(p.horizon_seconds/60)+" minutes · Verified deploy: "+date(publishedAt(data,p,currentReceipt)));
     add(card,"p","fine",p.reason);
     add(card,"p","risk",p.risks.join(" "));
     add(card,"p","fine","5% lower exit scenario: "+gp(p.stress.find(s=>s.exit_decline_bps===500)?.conditional_gp));
@@ -83,7 +85,7 @@ function renderScreen(data) {
     add(tr,"td",null,number(r.day_low_units)+" / "+number(r.day_high_units));
     add(tr,"td",null,number(r.quantity_assumption)); add(tr,"td",null,gp(r.conditional_after_tax_gp));
     const now=Date.now()/1000;
-    const rowCurrent=snapshotFresh(data)&&r.low_time&&r.high_time&&now>=r.low_time&&now>=r.high_time&&
+    const rowCurrent=displayFresh(data)&&r.low_time&&r.high_time&&now>=r.low_time&&now>=r.high_time&&
       now<r.low_time+300&&now<r.high_time+300;
     const status=add(tr,"td"); add(status,"span",r.flags.length || !rowCurrent ? "chip chip-bad":"chip",
       !snapshotFresh(data)?"HISTORICAL":(!rowCurrent?"EXPIRED QUOTE":(r.flags.length ? "EXCLUDED":"RESEARCH")));
@@ -164,19 +166,18 @@ function renderGraphs(data){
   add(card,"p","small","Review window: "+number(horizon/60)+" minutes · statistics use "+analysisName+" points only: "+number(valid.length)+" two-sided buckets; positive gross side difference in "+number(grossPositive)+". Lower-side average range: "+gp(lowMin)+" to "+gp(lowMax)+". These are descriptions, not a selection-policy input or executable quotes.");
   add(card,"p","small","Lowest observed lower-side bucket average: "+gp(minBucket?.low_avg)+" · reported lower-side units in that whole bucket: "+number(minBucket?.low_units)+" · exact units at that price: UNKNOWN · attainable fills: UNKNOWN.");
   add(card,"p","small","First-hand recent points: "+number(captured.length)+" (latest receipt "+date(latestCapture)+"); retrospective points: "+number(historical.length)+" (download receipt "+date(graph.received_at)+"). Source-window age: "+(newest?number(Math.max(0,Math.floor(Date.now()/1000-newest)))+" seconds":"UNKNOWN")+". Gaps break lines; downloaded history is never backdated as a prospective signal.");
-  if(!snapshotFresh(data))add(card,"p","risk","Historical snapshot only; current entry plans are unavailable.");
+  if(!displayFresh(data))add(card,"p","risk","Historical or unverified snapshot only; current entry plans are unavailable.");
 }
 
 function renderHistory(data) {
   const body=$("history-rows");body.replaceChildren();const outcomes=new Map((data.outcomes||[]).map(o=>[o.pick_id,o]));
-  (data.history||[]).slice().reverse().forEach(p=>{const tr=add(body,"tr");add(tr,"td",null,date(p.issued_at));add(tr,"td",null,p.name);add(tr,"td",null,gp(p.conditional_after_tax_gp));add(tr,"td",null,p.first_public_at ? date(p.first_public_at) : "NOT YET OBSERVED");const o=outcomes.get(p.id);add(tr,"td",null,o ? o.status+(o.reference_mark_gp === null || o.reference_mark_gp === undefined ? "" : " · full-quantity reference mark "+gp(o.reference_mark_gp)+" (no fill claim)") : "PENDING / NO FILL CLAIM");});
+  (data.history||[]).slice().reverse().forEach(p=>{const tr=add(body,"tr");add(tr,"td",null,date(p.issued_at));add(tr,"td",null,p.name);add(tr,"td",null,gp(p.conditional_after_tax_gp));const observed=publishedAt(data,p,currentReceipt);add(tr,"td",null,observed?date(observed):"NOT YET VERIFIED");const o=outcomes.get(p.id);add(tr,"td",null,o ? o.status+(o.reference_mark_gp === null || o.reference_mark_gp === undefined ? "" : " · full-quantity reference mark "+gp(o.reference_mark_gp)+" (no fill claim)") : "PENDING / NO FILL CLAIM");});
   if(!body.children.length){const tr=add(body,"tr");const td=add(tr,"td",null,"No issued picks yet.");td.colSpan=5;}
 }
 
 function renderDetails(data) {
   const source=$("source-details");source.replaceChildren();
-  const matched=currentReceipt && currentReceipt.artifact_id===data.artifact_id &&
-    currentReceipt.deployment_id===data.artifact_run_id;
+  const matched=matchingReceipt(data,currentReceipt);
   const autoAge=data.last_automatic_source_success_at?Date.now()/1000-data.last_automatic_source_success_at:null;
   const autoHealth=autoAge===null?"NOT_YET_OBSERVED":autoAge>900?"STALE_AUTOMATIC_COLLECTION · "+Math.floor(autoAge/60)+" minutes":"OBSERVED · "+Math.floor(autoAge/60)+" minutes ago";
   [["Status",fetchError ? "HISTORICAL · refresh failed: "+fetchError : data.source_status],
@@ -231,10 +232,9 @@ async function loadMatchingReceipt(data){
     const response=await fetch(url,{cache:"no-store",signal:controller.signal,credentials:"omit",referrerPolicy:"no-referrer"});
     if(!response.ok) return;
     const receipt=await response.json();
-    if(payload?.artifact_id===data.artifact_id && receipt.artifact_id===data.artifact_id &&
-       receipt.deployment_id===data.artifact_run_id) currentReceipt=receipt;
+    if(payload?.artifact_id===data.artifact_id && matchingReceipt(data,receipt)) currentReceipt=receipt;
   }catch{ /* A missing receipt leaves the current artifact clearly unacknowledged. */ }
-  finally{clearTimeout(timeout);if(payload?.artifact_id===data.artifact_id)renderDetails(data);}
+  finally{clearTimeout(timeout);if(payload?.artifact_id===data.artifact_id)renderAll();}
 }
 
 function main(){

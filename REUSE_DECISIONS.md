@@ -25,3 +25,17 @@ reports a same-tick record gap; and
 [Copilot #114](https://github.com/cbrewitt/flipping-copilot/issues/114)
 reports account-scope mixing. The current release does not assert those
 reports affect every installed version.
+
+## Completion v3: Copilot live-prices reference
+
+The owner supplied [live prices](https://flippingcopilot.com/live-prices)
+and [published terms](https://flippingcopilot.com/legal-and-tos) as optional
+references. Ordinary page viewing in this review exposed the page titles but
+no inspectable live rows or reusable data contract. The owner's dated
+specification reports indexed terms restricting the internal API and scraping;
+the present viewer could not independently text-extract the current terms.
+No vendor feed, authentication, internal API discovery, scraping, prediction
+label or account link is used. Sorting and filter ideas are implemented
+independently from the qualified Wiki feed. A future integration would need
+separate applicable written permission and review. This release functions
+without Copilot.

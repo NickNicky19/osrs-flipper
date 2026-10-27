@@ -1,26 +1,34 @@
 """Public-only pipeline regressions. Captured fixture is a reduced real v2 body."""
 import copy
+from dataclasses import replace
+from datetime import datetime, timezone
+from email.message import Message
+from email.utils import format_datetime
 import gzip
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import urllib.error
 
 from market import SourceContract, parse_payload
 from core import ValidationError
 from public_pipeline import (BANKROLL, SourceClient, _parse_safe, cycle, grade_picks,
     graph_stats, issue_picks, load_state, mark_published, new_state, parse_timeseries,
-    public_export, save_state, screen, compact_history, collect)
+    public_export, save_state, screen, compact_history, collect, _retry_delay,
+    ProviderDeferred, recover_pending_publication, verified_deploy_completed_at)
 from learning import (MIN_EXAMPLES, daily_readiness, examples, promotion_gate,
-    rollback, shadow_metrics, train_once)
+    rollback, shadow_metrics, train_once, feature_vector, predict, record_predictions,
+    HORIZON_SECONDS, FEATURE_LOOKBACK_SECONDS, compatible_model,
+    economic_shadow_comparison)
 
 
 SAMPLE = json.loads((Path(__file__).parent/'fixtures'/'captured-v2-sample.json').read_text(encoding='utf-8'))
 NOW = 1793132577
 
 
-def observations(items=6, buckets=85, start=1791000000):
+def observations(items=6, buckets=300, start=1791000000):
     result=[]
     for i in range(buckets):
         bucket=start+i*300
@@ -88,6 +96,43 @@ class PublicPipelineTests(unittest.TestCase):
         result=_parse_safe('latest',json.dumps(body).encode(),NOW,contract)
         self.assertIn('4151',result['items']);self.assertIn('999',result['rejected'])
 
+    def test_nullable_hourly_volume_excludes_only_affected_items(self):
+        contract=SourceContract(api_version='v2')
+        hour=copy.deepcopy(SAMPLE['1h'])
+        hour['data']['4151']['lowPriceVolume']=None
+        hour['data']['26219']['highPriceVolume']=None
+        latest_body=copy.deepcopy(SAMPLE['latest'])
+        latest_body['data']['27616']['highTime']=NOW-20
+        parsed=lambda kind, body: _parse_safe(kind,json.dumps(body).encode(),NOW,contract)
+        mapping=parsed('mapping',SAMPLE['mapping'])['items']
+        latest=parsed('latest',latest_body)
+        five=parsed('5m',SAMPLE['5m'])
+        hourly=parsed('1h',hour)
+        rules=dict(version='public-rules-1',ordinary_ids=[4151,26219,27616],exempt_ids=[])
+        rows={r['item_id']:r for r in screen(mapping,latest,five,hourly,rules,NOW)}
+        self.assertIn('HOURLY_LOW_UNITS_UNKNOWN',rows[4151]['flags'])
+        self.assertIn('HOURLY_HIGH_UNITS_UNKNOWN',rows[26219]['flags'])
+        for ident in (4151,26219):
+            self.assertEqual(rows[ident]['quantity_assumption'],0)
+            self.assertIsNone(rows[ident]['conditional_after_tax_gp'])
+        self.assertEqual(rows[27616]['status'],'ELIGIBLE_RESEARCH')
+        self.assertGreater(rows[27616]['quantity_assumption'],0)
+
+    def test_connected_dose_limit_without_group_registry_is_unqualified(self):
+        contract=SourceContract(api_version='v2')
+        parsed=lambda kind, body: _parse_safe(kind,json.dumps(body).encode(),NOW,contract)
+        mapping=parsed('mapping',SAMPLE['mapping'])['items']
+        mapping['999']=dict(name='Prayer potion(4)',members=True,public_limit=2000)
+        latest=parsed('latest',SAMPLE['latest']);latest['items']['999']=dict(latest['items']['4151'])
+        five=parsed('5m',SAMPLE['5m']);five['items']['999']=dict(five['items']['4151'])
+        hour=parsed('1h',SAMPLE['1h']);hour['items']['999']=dict(hour['items']['4151'])
+        rules=dict(version='public-rules-2',ordinary_ids=[4151],exempt_ids=[],
+                   exempt_registry={},special_exclusions={})
+        rows={r['item_id']:r for r in screen(mapping,latest,five,hour,rules,NOW)}
+        self.assertIn('SHARED_LIMIT_GROUP_UNREVIEWED',rows[999]['flags'])
+        self.assertEqual(rows[999]['status'],'EXCLUDED')
+        self.assertNotIn('SHARED_LIMIT_GROUP_UNREVIEWED',rows[4151]['flags'])
+
     def test_graph_distinguishes_bucket_units_from_at_price_units(self):
         stats=graph_stats([dict(bucket_start=300,low_avg=50.2,high_avg=60.1,low_units=100),
                            dict(bucket_start=600,low_avg=40.1,high_avg=65.2,low_units=5)])
@@ -114,6 +159,26 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertEqual(examples(obs,obs[0]['received_at']),[])
         self.assertEqual(train_once(obs,obs[0]['received_at'])['status'],'DATA_INSUFFICIENT')
 
+    def test_future_hour_target_and_point_in_time_feature_parity(self):
+        obs=observations(items=1,buckets=20)
+        rows=examples(obs,max(x['received_at'] for x in obs))
+        first=rows[0]
+        self.assertEqual(HORIZON_SECONDS,3600)
+        self.assertEqual(FEATURE_LOOKBACK_SECONDS,300)
+        self.assertEqual(first['target_bucket']-first['bucket_start'],3600)
+        self.assertGreaterEqual(first['target_bucket']-first['decision_at'],300)
+        current=next(o for o in obs if o['bucket_start']==first['bucket_start'])
+        prior=next((o for o in obs if o['bucket_start']==first['bucket_start']-300),None)
+        self.assertEqual(first['x'],feature_vector(current,prior))
+        state=new_state(first['decision_at'])
+        state['source_status']='CAPTURED_WITH_REVIEW'
+        state['models']=[train_once(observations(),max(o['received_at'] for o in observations()))['model']]
+        self.assertEqual(record_predictions(state,[dict(current,previous=prior)],first['decision_at']),1)
+        prediction=state['predictions'][0]
+        self.assertEqual(prediction['target_bucket'],first['target_bucket'])
+        self.assertEqual(prediction['forecast'],predict(state['models'][0],first['x']))
+        self.assertEqual(record_predictions(state,[dict(current,previous=prior)],first['target_bucket']-100),0)
+
     def test_late_label_cannot_enter_earlier_training_slice(self):
         obs=observations();cutoff=max(x['received_at'] for x in obs)
         normal=train_once(obs,cutoff)['model']
@@ -136,6 +201,66 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertGreater(state['circuit_open_until'],NOW)
         self.assertEqual(len(state['capture_metadata']),1)
 
+    def test_bulk_coverage_collapse_pauses_new_advice(self):
+        state=new_state(NOW)
+        state['route_counts']={'latest':1000}
+        result=collect(state,FakeClient(NOW),NOW)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error'],'LATEST_COVERAGE_COLLAPSE')
+        self.assertEqual(state['source_status'],'DATA_GAP')
+        self.assertGreater(state['circuit_open_until'],NOW)
+
+    def test_retry_after_full_wait_and_restart_circuit(self):
+        clock=[1000.0]
+        slept=[]
+        class RateLimited:
+            def open(self, request, timeout):
+                raise urllib.error.HTTPError(request.full_url,429,'rate limited',
+                    {'Retry-After':'120'},None)
+        client=SourceClient(SourceContract(api_version='v2'),opener=RateLimited(),
+            sleeper=slept.append,clock=lambda:clock[0])
+        with self.assertRaises(ProviderDeferred) as captured:
+            client.fetch('latest')
+        self.assertEqual(captured.exception.retry_at,1120)
+        self.assertEqual(client.calls,1)
+        self.assertEqual(slept,[])
+        state=new_state(1000)
+        class Deferred(FakeClient):
+            def fetch(self,kind,params=None,now=None):
+                self.calls+=1
+                raise ProviderDeferred(1120,'HTTP_429_RETRY_DEFERRED')
+        first=collect(state,Deferred(1000),1000)
+        self.assertEqual(first['error'],'HTTP_429_RETRY_DEFERRED')
+        self.assertEqual(state['circuit_open_until'],1120)
+        restarted=FakeClient(1060)
+        second=collect(state,restarted,1060)
+        self.assertEqual(second['error'],'SOURCE_CIRCUIT_OPEN')
+        self.assertEqual(restarted.calls,0)
+
+    def test_retry_after_http_date_and_malformed_fallback(self):
+        header=format_datetime(datetime.fromtimestamp(1120,timezone.utc),usegmt=True)
+        self.assertEqual(_retry_delay('120',0,1000),120)
+        self.assertEqual(_retry_delay(header,0,1000),120)
+        self.assertEqual(_retry_delay('not-a-date',0,1000),_retry_delay(None,0,1000))
+
+    def test_source_request_and_receipt_use_actual_injected_clock(self):
+        clock=[1000.0]
+        class Response:
+            status=200
+            url='https://prices.runescape.wiki/api/v2/osrs/latest'
+            def __init__(self):
+                self.headers=Message();self.headers['Content-Type']='application/json'
+            def __enter__(self): return self
+            def __exit__(self,*args): return False
+            def read(self,limit): return b'{"data":{}}'
+        class Opener:
+            def open(self,request,timeout):
+                clock[0]=1005.0
+                return Response()
+        client=SourceClient(SourceContract(api_version='v2'),opener=Opener(),clock=lambda:clock[0])
+        _,meta=client.fetch('latest')
+        self.assertEqual((meta['requested_at'],meta['received_at']),(1000,1005))
+
     def test_daily_chart_fetch_budget_is_durable(self):
         now=(NOW//86400)*86400+12*3600+900
         state=new_state(now);state['chart_budget_used']=16
@@ -143,6 +268,66 @@ class PublicPipelineTests(unittest.TestCase):
         result=cycle(state,FakeClient(now),rules,now,'budget-fixture')
         self.assertEqual(result['source_calls'],5)
         self.assertEqual(state['chart_budget_used'],16)
+
+    def test_chart_retry_after_stops_all_source_requests_and_advice(self):
+        now=(NOW//86400)*86400+12*3600+900
+        class ChartLimited(FakeClient):
+            def fetch(self,kind,params=None,now=None):
+                if kind=='timeseries':
+                    self.calls+=1
+                    raise ProviderDeferred(self.now+120,'HTTP_429_RETRY_DEFERRED')
+                return super().fetch(kind,params,now)
+        client=ChartLimited(now)
+        state=new_state(now)
+        rules=dict(version='public-rules-1',ordinary_ids=[4151],exempt_ids=[],valid_until='2027-01-01')
+        result=cycle(state,client,rules,now,'chart-rate-limit')
+        self.assertEqual(result['status'],'DATA_GAP')
+        self.assertEqual(result['issued'],0)
+        self.assertEqual(state['circuit_open_until'],now+120)
+        self.assertEqual(client.calls,6)
+
+    def test_chart_access_denial_pauses_provider_after_one_request(self):
+        now=(NOW//86400)*86400+12*3600+900
+        class Denied(FakeClient):
+            def fetch(self,kind,params=None,now=None):
+                if kind=='timeseries':
+                    self.calls+=1
+                    raise ValidationError('HTTP_403')
+                return super().fetch(kind,params,now)
+        client=Denied(now);state=new_state(now)
+        rules=dict(version='public-rules-1',ordinary_ids=[4151],exempt_ids=[],valid_until='2027-01-01')
+        result=cycle(state,client,rules,now,'chart-access-denied')
+        self.assertEqual((result['status'],result['issued']),('PAUSED',0))
+        self.assertEqual(client.calls,6)
+        self.assertTrue(state['public_pause'])
+        self.assertEqual(state['source_error'],'HTTP_403')
+
+    def test_chart_exhausted_network_retry_opens_circuit(self):
+        now=(NOW//86400)*86400+12*3600+900
+        class Offline(FakeClient):
+            def fetch(self,kind,params=None,now=None):
+                if kind=='timeseries':
+                    self.calls+=1
+                    raise ValidationError('TRANSIENT_NETWORK_FAILURE: URLError')
+                return super().fetch(kind,params,now)
+        client=Offline(now);state=new_state(now)
+        rules=dict(version='public-rules-1',ordinary_ids=[4151],exempt_ids=[],valid_until='2027-01-01')
+        result=cycle(state,client,rules,now,'chart-network-offline')
+        self.assertEqual((result['status'],result['issued']),('DATA_GAP',0))
+        self.assertEqual((client.calls,state['circuit_open_until']),(6,now+300))
+
+    def test_review_expiry_during_slow_cycle_blocks_new_advice(self):
+        now=(NOW//86400)*86400+12*3600+900
+        client=FakeClient(now)
+        client.clock=lambda:now+100
+        client.contract=replace(client.contract,expires_at=now+50)
+        state=new_state(now);state['chart_budget_used']=16
+        rules=dict(version='public-rules-1',ordinary_ids=[4151],exempt_ids=[],valid_until='2027-01-01')
+        result=cycle(state,client,rules,now,'review-expiry')
+        self.assertEqual(result['status'],'PAUSED')
+        self.assertEqual(result['issued'],0)
+        self.assertEqual(state['source_error'],'SOURCE_CONTRACT_NOT_REVIEWED')
+        self.assertEqual(state['last_run_end_at'],now+100)
 
     def test_no_new_matured_data_and_job_limits(self):
         obs=observations();cutoff=max(x['received_at'] for x in obs)
@@ -155,6 +340,40 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertEqual(len(state['models']),1)
         self.assertEqual(model_id,state['models'][0]['id'])
 
+    def test_frozen_holdout_evidence_and_split_metadata_are_checksummed(self):
+        obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']
+        self.assertTrue(compatible_model(model))
+        for field,mutation in [('metrics',lambda m:m['metrics']['holdout'].update(candidate_price_mae_bps=0)),
+                               ('samples',lambda m:m['samples'].update(train=1))]:
+            altered=copy.deepcopy(model);mutation(altered)
+            with self.subTest(field=field):
+                self.assertFalse(compatible_model(altered))
+                self.assertIn('MODEL_SCHEMA_OR_CHECKSUM',promotion_gate(altered,None,None)['reasons'])
+                with self.assertRaises(ValueError):predict(altered,[0,0,0,0])
+
+    def test_verified_deployment_clock_allows_bounded_shadow_replay(self):
+        obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']
+        model['status']='SHADOW';start=(NOW//3600)*3600
+        state=new_state(start);state['models']=[model]
+        state['shadow_decisions']=[];state['observations']=[]
+        for i in range(100):
+            issued=start+i*3600
+            plan=dict(item_id=1,buy=100,sell=120,quantity=10,
+                      entry_deadline=issued+600,public_limit=10,tax_exempt=False,
+                      limit_group_status='VERIFIED_ITEM_ONLY')
+            state['shadow_decisions'].append(dict(model_id=model['id'],issued_at=issued,
+                public_available_at=issued+30,capital=BANKROLL,slots=4,
+                baseline=[plan],candidate=[plan]))
+        for bucket in range(start,start+100*3600,300):
+            state['observations'].append(dict(item_id=1,bucket_start=bucket,
+                received_at=bucket+300,low_avg=100,high_avg=120,low_units=100,
+                high_units=100,source='CAPTURED_5M',capture_hash='fixture'))
+        result=economic_shadow_comparison(state,start+100*3600+300)
+        self.assertEqual(result['evidence_class'],'FORWARD_ASSUMPTION_SIMULATION')
+        self.assertEqual(result['clocks'],100)
+        self.assertGreater(result['baseline_modeled_sold_units'],0)
+        self.assertFalse(promotion_gate(model,None,result)['pass_all'])
+
     def test_failed_promotion_and_atomic_baseline_rollback(self):
         model=train_once(observations(),max(x['received_at'] for x in observations()))['model']
         failed=promotion_gate(model,None,None)
@@ -164,6 +383,61 @@ class PublicPipelineTests(unittest.TestCase):
         state['active_model_id']=model['id'];rollback(state)
         self.assertIsNone(state['active_model_id'])
         self.assertEqual(state['learning_status'],'RULES_BASELINE')
+
+    def test_research_policy_is_versioned_and_promotion_is_reversible(self):
+        now=NOW;state=new_state(now);state['source_status']='CAPTURED_WITH_REVIEW'
+        row=valid_row(1,now);row['ranking_mode']='ML_RESEARCH_ACTIVE'
+        research=issue_picks(state,[row],now,[dict(sha256='abc')])[0]
+        self.assertEqual(research['policy'],'ml-research-rank-1')
+        baseline_state=new_state(now);baseline_state['source_status']='CAPTURED_WITH_REVIEW'
+        baseline=issue_picks(baseline_state,[valid_row(1,now)],now,[dict(sha256='abc')])[0]
+        self.assertEqual(baseline['policy'],'rules-baseline-1')
+        self.assertNotEqual(research['id'],baseline['id'])
+        obs=observations();cutoff=max(o['received_at'] for o in obs)
+        model=train_once(obs,cutoff)['model'];model['status']='SHADOW'
+        promotion=new_state(cutoff);promotion['source_status']='CAPTURED_WITH_REVIEW'
+        promotion['models']=[model];promotion['last_learning_check']=cutoff
+        with (patch('learning.shadow_metrics',return_value={model['id']:{'n':400,'days':7,'coverage_bps':9500}}),
+              patch('learning.shadow_portfolio_comparison',return_value={'clocks':100}),
+              patch('learning.economic_shadow_comparison',return_value={'evidence_class':'FORWARD_ASSUMPTION_SIMULATION'}),
+              patch('learning.promotion_gate',return_value={'pass_all':True,'reasons':[]})):
+            self.assertEqual(daily_readiness(promotion,cutoff+86400),'ML_RESEARCH_ACTIVE')
+        self.assertEqual(promotion['active_model_id'],model['id'])
+        self.assertEqual(model['status'],'RESEARCH_ACTIVE')
+        rollback(promotion)
+        self.assertIsNone(promotion['active_model_id'])
+        self.assertEqual(promotion['learning_status'],'RULES_BASELINE')
+
+    def test_two_bounded_generations_need_new_matured_clocks(self):
+        obs=observations();cutoff=max(o['received_at'] for o in obs)
+        state=new_state(cutoff);state['observations']=obs;state['source_status']='CAPTURED_WITH_REVIEW'
+        self.assertEqual(daily_readiness(state,cutoff),'ML_SHADOW')
+        first_id=state['models'][0]['id']
+        good_shadow=dict(n=400,days=7,coverage_bps=9500,baseline_price_mae_bps=100,
+            candidate_price_mae_bps=80,baseline_log_units_mae=1,candidate_log_units_mae=.8,
+            baseline_high_price_mae_bps=100,candidate_high_price_mae_bps=80,
+            baseline_high_log_units_mae=1,candidate_high_log_units_mae=.8,positive_days=7)
+        reference=dict(evidence_class='REFERENCE_MARK_NO_FILLS',clocks=100,coverage_bps=9500)
+        with (patch('learning.shadow_metrics',return_value={first_id:good_shadow}),
+              patch('learning.shadow_portfolio_comparison',return_value=reference)):
+            self.assertEqual(daily_readiness(state,cutoff+86400),'RULES_BASELINE')
+        self.assertEqual(state['models'][0]['status'],'SHADOW_REJECTED')
+        self.assertIn('MATCHED_PORTFOLIO_EVIDENCE',state['promotion_gate']['reasons'])
+        state['observations']=observations(buckets=500)
+        second_time=max(o['received_at'] for o in state['observations'])
+        self.assertEqual(daily_readiness(state,second_time+2*86400),'ML_SHADOW')
+        self.assertEqual(len(state['models']),2)
+        self.assertNotEqual(first_id,state['models'][1]['id'])
+        self.assertEqual(state['models'][1]['generation'],2)
+        self.assertNotEqual(state['models'][0]['lambda_'],state['models'][1]['lambda_'])
+
+    def test_corrupt_model_checksum_is_rejected_before_prediction(self):
+        obs=observations();cutoff=max(o['received_at'] for o in obs)
+        model=train_once(obs,cutoff)['model']
+        self.assertTrue(compatible_model(model))
+        model['price_weights'][0]+=100
+        self.assertFalse(compatible_model(model))
+        with self.assertRaises(ValueError): predict(model,[0,1,1,0])
 
     def test_paper_cash_conservation_and_expiry(self):
         now=NOW;state=new_state(now);state['source_status']='CAPTURED_WITH_REVIEW'
@@ -202,6 +476,49 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertIsNone(state['outcomes'][0]['actual_gp'])
         self.assertIsNone(state['outcomes'][0]['hypothetical_fill'])
 
+    def test_failed_ack_recovery_requires_successful_prior_deploy(self):
+        state=new_state(NOW);state['source_status']='CAPTURED_WITH_REVIEW'
+        pick=issue_picks(state,[valid_row(1,NOW)],NOW,[dict(sha256='abc')])[0]
+        state['pending_publication']=dict(deployment_id='123-1',artifact_id='a'*32,
+            export_sha256='b'*64,pick_ids=[pick['id']],run_event='schedule')
+        with self.assertRaises(ValueError): recover_pending_publication(state,[],NOW+30,'https://example.test')
+        self.assertIsNone(pick['first_public_at'])
+        recovered=recover_pending_publication(state,[dict(name='deploy',status='completed',
+            conclusion='success',completed_at=datetime.fromtimestamp(NOW+20,timezone.utc).isoformat())],
+            NOW+3600,'https://example.test')
+        self.assertEqual(recovered['published'],1)
+        self.assertEqual(pick['first_public_at'],NOW+20)
+        self.assertEqual(pick['status'],'PUBLIC_FORWARD_PAPER')
+        self.assertIsNone(state['pending_publication'])
+        self.assertEqual(state['last_automatic_publication_at'],NOW+20)
+        self.assertEqual(state['publication_receipts'][-1]['artifact_id'],'a'*32)
+        self.assertEqual(state['publication_receipts'][-1]['recovered_at_next_run'],NOW+3600)
+        self.assertEqual(state['publication_receipts'][-1]['availability_clock'],'VERIFIED_DEPLOY_JOB_COMPLETION')
+        self.assertEqual(recover_pending_publication(state,[],NOW+120,'https://example.test')['status'],
+                         'NO_PENDING_DEPLOYMENT')
+        failed=new_state(NOW);failed['pending_publication']=dict(deployment_id='124-1',
+            artifact_id='a'*32,export_sha256='b'*64,pick_ids=[],run_event='push')
+        self.assertEqual(recover_pending_publication(failed,[dict(name='deploy',status='completed',
+            conclusion='failure')],NOW+60,'https://example.test')['status'],'PREVIOUS_DEPLOYMENT_FAILED')
+        self.assertEqual(failed['publication_receipts'],[])
+
+    def test_known_backfill_gap_is_visible_without_making_old_quotes_fresh(self):
+        state=new_state(NOW)
+        state['data_gap']=dict(from_bucket=NOW-7200,to_bucket=NOW-3600,reason='BACKFILL_BOUND')
+        export=public_export(state,NOW+60)
+        self.assertEqual(export['known_data_gap'],state['data_gap'])
+        self.assertEqual(export['source_status'],'DATA_UNAVAILABLE')
+
+    def test_verified_deploy_timestamp_is_required_and_bounded(self):
+        good=dict(name='deploy',status='completed',conclusion='success',
+                  completed_at=datetime.fromtimestamp(NOW+10,timezone.utc).isoformat())
+        self.assertEqual(verified_deploy_completed_at([good],NOW+20),NOW+10)
+        for bad in ({**good,'completed_at':None}, {**good,'completed_at':'2026-01-01'},
+                    {**good,'completed_at':datetime.fromtimestamp(NOW+90,timezone.utc).isoformat()},
+                    {**good,'status':'in_progress'}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                verified_deploy_completed_at([bad],NOW+20)
+
     def test_late_price_path_revision_preserves_gap_and_loss_mark(self):
         state=new_state(NOW);state['source_status']='CAPTURED_WITH_REVIEW'
         pick=issue_picks(state,[valid_row(1,NOW)],NOW,[dict(sha256='abc')])[0]
@@ -224,10 +541,14 @@ class PublicPipelineTests(unittest.TestCase):
             self.assertEqual(load_state(path)['schema'],state['schema'])
             state['picks']=[dict(id=str(i),item_id=i,issued_at=NOW-90000,
                 first_public_at=None,status='ISSUED_NOT_YET_PUBLIC') for i in range(121)]
+            state['picks'][0]['first_public_at']=NOW-89900
+            state['picks'][0]['status']='WINDOW_EXPIRED_EXECUTION_UNKNOWN'
+            state['outcomes']=[dict(id='gap-0',pick_id='0',status='DATA_GAP')]
             archive=Path(tmp)/'archive'
             compact_history(state,archive,NOW)
             self.assertEqual(state['archived_counts']['picks'],1)
-            with gzip.open(next(archive.glob('*.gz')),'rt') as f: self.assertEqual(len(f.readlines()),1)
+            self.assertEqual(state['archived_counts']['outcomes'],1)
+            with gzip.open(next(archive.glob('*.gz')),'rt') as f: self.assertEqual(len(f.readlines()),2)
             compact_history(state,archive,NOW)
             self.assertEqual(state['archived_counts']['picks'],1)
 

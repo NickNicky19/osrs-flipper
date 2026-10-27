@@ -55,8 +55,11 @@ kept the 5m GP per-item cap and added exemptions. The
 [GE reference](https://oldschool.runescape.wiki/w/Grand_Exchange) documents
 per-unit floor rounding and a named exemption list. The public paper site
 models **new** offers only. It never applies a new-offer formula to a real
-grandfathered offer. `public-rules.json` is a conservative ordinary-tax subset;
-other items are visible with `TAX_RULE_UNREVIEWED`. Mapping's public limit is
+grandfathered offer. The first release used a conservative 44-ID subset.
+`public-rules-2` now applies the general new-offer rule to mapped tradeable
+items with known limits, with an exact ID/name exemption registry and a
+special-mechanic exclusion. Unknown or mismatched variants remain
+`TAX_RULE_UNREVIEWED`. Mapping's public limit is
 not the user's remaining personal allowance or shared-group state. Membership,
 slot availability, cancellations and exact fills remain personal/unknown.
 
@@ -66,7 +69,7 @@ volume-at-price. No HTML guide feed enters the automated pick pipeline.
 
 ## Evidence limits
 
-The later live manual cycle parsed 4,551 screener items, found seven eligible
+The first-release live manual cycle parsed 4,551 screener items, found seven eligible
 and issued four
 conditional paper plans. It did not record an actual trade, infer a fill,
 calibrate a probability, demonstrate after-tax profit, or prove that its
@@ -77,3 +80,61 @@ receipts after deployment. GitHub documents [free standard hosted runners for
 public repositories](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job),
 [five-minute shortest schedules with possible delays or drops](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows),
 and [a custom Pages workflow exception to the ten-builds/hour soft limit](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits).
+
+## Completion v3 runtime requalification
+
+A separate bounded probe from the Windows execution environment on 27 October
+2026 at 22:32:59–22:33:00 UTC used nine requests, 2,187,341 raw bytes and
+the reviewed OSRS main-game **v2 route individually for mapping, latest, 5m,
+1h, 24h and four timeseries**. The first five response SHA-256 hashes were:
+
+| Route | Accepted / quarantined | Response SHA-256 |
+| --- | ---: | --- |
+| mapping | 4,672 / 2 | `801c0e45df3e817bc46b6747596dc2ba90f4b72f9d19014c3dd5744bbec708ca` |
+| latest | 4,551 / 0 | `409e995c98d6012ec670090ca038ad16da218628af29227e42a8a70e0a7ccda1` |
+| 5m | 1,961 / 0 | `99b7c8b89215ef6c3f96552060b89197c1ec241dbcf6842d23fbafa163165252` |
+| 1h | 3,362 / 0 | `7e80498e880784bfc8120a207ad0a444116ead4c37ae2fb24ed03e228b9300b1` |
+| 24h | 4,246 / 0 | `09862205d027ef81f107f21beac6e4e622a443c65840f37311e6efb64acb5be0` |
+
+The four bounded timeseries SHA-256 values are
+`9394fca8dfb1c42813a7108f584a20154aa75421948ab27441cca68d34c99ef1`,
+`cba55476f08f0fa4bb56bb4cb3018984857396d990fd0e3d40bfcbd432f1364d`,
+`92d7f92df36840a9f355cc94185527c3d824d89aeb97e8379dd8d32d3f0d35de`,
+and `5c7c1565724246ff5bc26c9151121a5db46fe420b7ff1c85cfc3dea7bec29d34`.
+Raw bytes and receipts remain in the local task evidence directory, outside
+the public repository. The local probe initially failed under the restricted
+network sandbox and succeeded with approved network access; GitHub-hosted
+runtime access must be checked separately by its workflow run.
+
+The v3 cycle screened 4,551 observed IDs: 4,077 had supported tax/limit rules,
+209 had currently fresh two-sided quotes, 827 had sufficient activity fields,
+493 had positive baseline-size arithmetic and 118 passed the research gates.
+Counts overlap and do not mean all 4,551 were fully profit-qualified. It
+issued four frozen-baseline paper plans under one shared 500m account. Its
+3,018,390-byte static export fit the 8 MB bound. Learning reported
+`DATA_INSUFFICIENT`; the capture did not establish fills or profitable trades.
+The original 44-ID baseline and prior issued picks remain unchanged. The
+broader pool is for transparent personal research and later reviewed policies.
+
+A final bounded Windows cycle with the charged-variant exclusion in place
+(`local-source-qualify-v3-final-1`) screened 4,551 IDs, retained 4,077 with
+supported tax/limit rules, 195 fresh two-sided observations, 847 with adequate
+activity fields, 499 with positive conditional arithmetic, and **81** eligible
+research rows. Counts overlap. It used 18 source requests and 2,988,788 raw
+bytes, issued four frozen-baseline paper plans and exported artifact
+`85b27575d27b1eedb21478f73d7723dc` (SHA-256
+`edc71b05e89c2ca82f7ac915160466a2d6a59a0282e9190194ff55e0ab98d68b`).
+This is a local manual evidence run, not a hosted schedule or fill.
+
+The [Wiki buying-limit reference](https://oldschool.runescape.wiki/w/Grand_Exchange/Buying_limits)
+explicitly describes connected limits across potion doses. The structured
+mapping does not identify those groups. Numeric charged/dose variants are
+therefore flagged `SHARED_LIMIT_GROUP_UNREVIEWED` and excluded from current
+plans pending a reviewed group registry. Other item-only limit assumptions
+remain labeled; the public limit never certifies a personal remaining amount.
+
+The current [GE exemption list](https://oldschool.runescape.wiki/w/Grand_Exchange#Exempt_from_tax)
+contains named low-level food, consumables, teleports, tools and bonds. The
+registry checks each mapped ID **and** name, and excludes bond conversion
+mechanics from this same-item policy. The exemption page does not establish
+personal remaining buy allowance or exact volume at the displayed price.

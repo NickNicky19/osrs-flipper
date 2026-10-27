@@ -1,7 +1,9 @@
 # Future local-first RuneLite import contract (design only)
 
-**No plugin is installed or operated by this release.** A later, reviewed
-read-only integration may deliver a user-selected private file to the local
+**No plugin is installed or operated by this release.** The current browser
+journal uses `osrs-private-offer-events-1` inside an SHA-256 checked
+`osrs-private-backup-1` envelope. A later, reviewed read-only integration may
+deliver a user-selected private file to the browser journal or local
 Workbench. It never sends account records to GitHub Actions, Pages or a vendor.
 
 ## Versioned envelope
@@ -12,6 +14,15 @@ is private and must not be a RuneScape name in public logs. Import requires
 explicit file selection, validates schema/version/hash, makes an encrypted or
 filesystem-protected local backup, and deduplicates by stable event/offer IDs.
 Unknown versions pause without guessing.
+
+The future importer must map that envelope to the browser's event IDs and
+`portfolioId` only after an explicit account-namespace selection. Its
+`PLACE`, `FILL`, `CANCEL`, `COLLECT`, `REPRICE`, `OPENING_LOT`, cash-flow and
+`CORRECTION` events retain exact quantities and total GP. The current
+`REPRICE_NOTE` legacy event records an unreconciled note; a new `REPRICE`
+event changes the remaining buy escrow or sell offer price in replay. Backups
+must stay local; a cross-device import validates hash and merges by stable
+event ID transactionally. The public site never reads the backup.
 
 Each event carries an offer-instance ID that survives slot reuse; account
 namespace; slot; item ID/variant; side; offered price and quantity; cumulative

@@ -7,6 +7,8 @@ const node = (tag, cls, value) => { const el = document.createElement(tag); if (
 const add = (parent, tag, cls, value) => { const child = node(tag, cls, value); parent.append(child); return child; };
 const detail = (parent, label, value) => { add(parent,"dt",null,label); add(parent,"dd",null,value); };
 let payload;
+const currentPicks = (data, now, fresh) => fresh ? (data.top_picks || []).filter(p =>
+  p.expires_at > now && p.observed_low_time+300 > now && p.observed_high_time+300 > now) : [];
 
 function renderStatus(data) {
   const now = Date.now()/1000;
@@ -19,20 +21,21 @@ function renderStatus(data) {
   add(box,"div","big",gp(data.bankroll));
   add(box,"div","caption","Stated bankroll for research, not a connected account");
   const dl = add(box,"dl");
-  detail(dl,"Cash available",gp(data.cash_available));
-  detail(dl,"Reserved for paper plans",gp(data.cash_reserved));
-  detail(dl,"If all active plans fully round-trip",gp(data.performance.conditional_active_portfolio_gp));
+  detail(dl,"Cash available at last run",gp(data.cash_available));
+  detail(dl,"Reserved at last run",gp(data.cash_reserved));
+  detail(dl,"If currently visible plans fully round-trip",gp(currentPicks(data,now,fresh).reduce((total,p)=>total+p.conditional_after_tax_gp,0)));
   detail(dl,"Simulated realized GP",gp(data.performance.simulated_realized_gp));
   detail(dl,"Unsold inventory at cost",gp(data.performance.simulated_inventory_at_cost));
   detail(dl,"Provisional live pilot ceiling",gp(data.live_pilot_ceiling));
   detail(dl,"Actual profit","NOT TRACKED HERE");
+  add(box,"div","caption","Expired plans disappear here immediately; the next collection releases their paper reservations in durable state.");
   return fresh;
 }
 
 function renderPicks(data, fresh) {
   const box = $("picks"); box.replaceChildren();
   const now = Date.now()/1000;
-  const picks = fresh ? data.top_picks.filter(p => p.expires_at > now && p.observed_low_time+300 > now && p.observed_high_time+300 > now) : [];
+  const picks = currentPicks(data,now,fresh);
   if (!picks.length) { add(box,"div","empty",fresh ? "NO_ACTION · No current paper plan passes the evidence and cash filters." : "Current offer plans are unavailable. The last research and source status remain visible below."); return; }
   picks.forEach(p => {
     const card = add(box,"article","pick");

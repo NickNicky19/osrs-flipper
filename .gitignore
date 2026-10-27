@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.sqlite3
+*.sqlite3-*
+.venv/
+durable/
+cycle-receipt.json
+publication-receipt.json
+osrs-flip-lab/data/
+osrs-flip-lab/config/source-review.json
+osrs-flip-lab/config/private-*.json
+site/private/

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>OSRS Flip Lab · public paper research</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand"><span class="brand-mark">↗</span><div><strong>OSRS Flip Lab</strong><small>Public market research · manual game actions only</small></div></div>
+    <div id="live-status" class="status status-loading">Loading source status…</div>
+  </header>
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">THE PAPER DESK</p><h1>Offer plans with the cash math in view.</h1><p>These are conditional same-item buy and sell plans for one simulated 500m GP portfolio. Past trade prices are references, not orders you can assume will fill.</p></div>
+      <aside id="portfolio" class="portfolio" aria-label="Paper portfolio"></aside>
+    </section>
+    <nav class="tabs" aria-label="Sections"><a href="#top-picks">Top picks</a><a href="#screener">Full screener</a><a href="#graphs">Item graphs</a><a href="#history">History</a><a href="#method">Method & source</a></nav>
+    <section id="top-picks" class="section"><div class="section-head"><div><p class="eyebrow">01 / CURRENT RESEARCH</p><h2>Top picks</h2></div><p class="section-note">Up to four plans, sharing one cash balance and four paper slots. No action is a valid result.</p></div><div id="picks" class="pick-grid"></div></section>
+    <section id="screener" class="section"><div class="section-head"><div><p class="eyebrow">02 / COVERAGE</p><h2>Full screener</h2></div><p id="coverage" class="section-note"></p></div><div class="screen-controls"><label for="search">Find item</label><input id="search" type="search" placeholder="Name or item ID" autocomplete="off"><label for="filter">Show</label><select id="filter"><option value="all">All observations</option><option value="eligible">Eligible research</option><option value="excluded">Excluded</option></select></div><div class="table-wrap"><table><thead><tr><th>Item</th><th>Instant sell<br>observed</th><th>Instant buy<br>observed</th><th>24h reported<br>low / high units</th><th>Assumed qty</th><th>Conditional net</th><th>Status / reason</th></tr></thead><tbody id="screen-rows"></tbody></table></div><p id="screen-count" class="small"></p></section>
+    <section id="graphs" class="section"><div class="section-head"><div><p class="eyebrow">03 / NUMERICAL HISTORY</p><h2>Item graphs</h2></div><p class="section-note">Observed bucket averages and whole-bucket units. Exact volume at a price and attainable fills remain unknown.</p></div><div id="graph-list" class="graph-grid"></div></section>
+    <section id="history" class="section"><div class="section-head"><div><p class="eyebrow">04 / ISSUANCE & OUTCOMES</p><h2>Pick history</h2></div><p class="section-note">Issuance is recorded before publication. Later price-path checks do not create simulated or actual profit.</p></div><div class="table-wrap"><table><thead><tr><th>Issued</th><th>Item</th><th>Conditional net</th><th>Public availability</th><th>Later observation</th></tr></thead><tbody id="history-rows"></tbody></table></div></section>
+    <section id="method" class="section"><div class="section-head"><div><p class="eyebrow">05 / EVIDENCE</p><h2>Method & source health</h2></div></div><div class="method-grid"><article class="panel"><h3>What the numbers mean</h3><p>Maximum buy and target sell use the latest reported instant-sell and instant-buy transactions. A buy offer at the lower reference and a later sell offer at the higher reference are hypothetical. Conditional GP = assumed quantity × (target sell − per-unit GE tax − maximum buy).</p><p>Quantity is capped by public buy limit, 10% of each reported hourly side volume, available shared paper cash and a 125m GP position cap. The 10% rule is a stated stress assumption, not an estimate of order depth or your remaining allowance.</p><p>Exact units traded at a displayed average price and the quantity our offer might fill are <strong>unknown</strong>. Losses, unfilled windows and residual inventory are not silently counted as wins.</p></article><article class="panel"><h3>Source & freshness</h3><dl id="source-details"></dl><p>Feed: <a href="https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices">OSRS Wiki real-time prices API</a>, OSRS main-game routes. Guide prices are separate context. GitHub schedules may be delayed or dropped; this browser expires plans using their own timestamps.</p></article><article class="panel"><h3>Learning state</h3><dl id="learning-details"></dl><p>The fixed CPU candidate forecasts the next reported 5m lower-side average and units. Forecasts do not predict fills. The rules baseline remains active unless predeclared chronological, later shadow and matched-portfolio gates all pass. No private execution records are used here.</p></article><article class="panel"><h3>Evidence classes</h3><ul><li><strong>Conditional scenario:</strong> arithmetic if the stated trades complete.</li><li><strong>Historical simulation:</strong> a retrospective rule replay under named assumptions; none is displayed as real profit.</li><li><strong>Forward paper:</strong> preissued plans with later public observations, still no verified fills.</li><li><strong>Actual user recorded:</strong> private and absent from this website.</li></ul><p>The 50m GP live-pilot ceiling is provisional and separate from this 500m GP paper account. All in-game actions are manual.</p></article></div></section>
+  </main>
+  <footer><span>OSRS Flip Lab · independent public research</span><span>Data: <a href="https://prices.runescape.wiki/">OSRS Wiki</a> · Game rules: <a href="https://oldschool.runescape.wiki/w/Grand_Exchange">OSRS Wiki GE</a> · No vendor predictions or account connection</span></footer>
+</body>
+</html>

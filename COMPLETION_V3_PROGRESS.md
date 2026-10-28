@@ -42,7 +42,8 @@ time**. A new check at 21:55 UTC on 28 October found five successful
 40734426408 and 40774268101. The latest schedule began at 21:43:16 UTC
 against the preceding main `c864b528`; it is distinct from the later
 merge-triggered push run. Its research, Pages deployment and acknowledgement
-completed. The `paper-data` branch subsequently continued to `a8ce5c8` for
+completed. A schedule-triggered run on the corrected release itself is
+`NOT_YET_OBSERVED`. The `paper-data` branch subsequently continued to `a8ce5c8` for
 the push receipt, with 30 picks, 23 outcomes and 1,061 observations. Scheduled
 runs have been separated by hours, so the advertised approximately five-minute collection cadence is
 **not established**. Browser validity rules expire old quotes independently.
@@ -57,7 +58,7 @@ authorized by this evidence.
 | Browser A→B refresh, stale expiry, forms and mobile/subpath | refresh.mjs, app.js; local A→B preserved an unsaved quantity; deployed tab changed artifact 8d51cc75 to b18a5796 without reload; 390px deployed viewport had 375px content and scroll widths | PASS |
 | Nullable units, Retry-After, denial/circuit, request clocks | public_pipeline.py; captured-format/restart regressions; final live Windows cycle 18 calls, 2,988,788 bytes | PASS_LOCAL |
 | Accurate deploy identity and pick publication clock | public-research.yml, verified deploy-job completion, delayed-recovery regression; current Pages receipt 8b6a5d08 / 40775544952-1 matched public export SHA; browser gates current plans on that receipt | PASS |
-| Recurrence and durable state across runners | one active workflow; five successful scheduled runs through 40774268101, then push run 40775544952; `paper-data` a8ce5c8, 30 picks/23 outcomes/1,061 observations; schedule gaps of hours | PERSISTENCE_PASS; SCHEDULE_OBSERVED; FIVE_MINUTE_CADENCE_FAIL |
+| Recurrence and durable state across runners | one active workflow; five successful scheduled runs through 40774268101 on prior main, then corrected-release push run 40775544952; `paper-data` a8ce5c8, 30 picks/23 outcomes/1,061 observations; schedule gaps of hours | PERSISTENCE_PASS; CORRECTED_RELEASE_SCHEDULE_NOT_YET_OBSERVED; FIVE_MINUTE_CADENCE_FAIL |
 | Broader supported universe, coverage stages, graphs | public-rules-2, source review; deployed capture had 4,551 observed / 4,078 rule-supported / 75 research eligible and four conditional benchmark plans before expiry | PASS; unknown shared limits excluded |
 | High Total GP preference and personal budget | planner.mjs, broad 4,551-row allowlisted screener, shared cash/slot/pilot caps; Node arithmetic and deployed browser NO_ACTION at 1m | PASS |
 | Browser My Trades and opening state | journal-core.mjs, journal-db.mjs, personal-ui.mjs; exact gross/net, partial sale, open stock, cross-tab, backup merge in local browser | PASS_LOCAL; same-origin privacy boundary disclosed |

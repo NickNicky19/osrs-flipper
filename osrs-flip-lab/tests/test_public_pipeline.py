@@ -170,7 +170,8 @@ class PublicPipelineTests(unittest.TestCase):
     def test_issued_pick_sampling_stops_after_its_forward_window(self):
         pick=dict(item_id=4151,first_public_at=1000,horizon_seconds=3600)
         self.assertEqual(pending_pick_observation_ids([pick],8200),[4151])
-        self.assertEqual(pending_pick_observation_ids([pick],8260),[])
+        self.assertEqual(pending_pick_observation_ids([pick],8260),[4151])
+        self.assertEqual(pending_pick_observation_ids([pick],9160),[])
         self.assertEqual(pending_pick_observation_ids(
             [dict(pick,first_public_at=None)],2000),[])
 
@@ -443,6 +444,24 @@ class PublicPipelineTests(unittest.TestCase):
                          [(r['item_id'],qty) for r,qty,_ in selected])
         self.assertEqual(comparison['baseline'][0]['item_id'],26219)
         self.assertEqual(comparison['candidate'][0]['item_id'],4151)
+
+    def test_shadow_keeps_rules_fallback_when_forecast_features_missing(self):
+        start=(NOW//3600)*3600
+        now=start+400
+        row=dict(item_id=4151,flags=[],legacy_baseline_supported=True,
+                 observed_instant_sell_low=1_000_000,observed_instant_buy_high=1_200_000,
+                 low_time=now-20,high_time=now-20,quantity_assumption=10,
+                 required_cash=10_000_000,conditional_after_tax_gp=1_760_000,
+                 public_limit=70,tax_exempt=False,limit_group_status='ITEM_ONLY_ASSUMED',
+                 research_rank_score=1_760_000,ranking_mode='RULES_BASELINE')
+        five=dict(start=start,items={'4151':dict(low_avg=None,high_avg=1_200_000,
+                   low_units=200,high_units=200)})
+        state=new_state(now);state['source_status']='CAPTURED_WITH_REVIEW'
+        state['models']=[dict(id='fixture',status='SHADOW')]
+        self.assertTrue(record_shadow_decision(state,[row],five,now))
+        decision=state['shadow_decisions'][-1]
+        self.assertEqual(decision['baseline'],decision['candidate'])
+        self.assertEqual(decision['candidate'][0]['item_id'],4151)
 
     def test_verified_deployment_clock_allows_bounded_shadow_replay(self):
         obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']

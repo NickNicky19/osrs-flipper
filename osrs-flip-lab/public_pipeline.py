@@ -42,6 +42,7 @@ MIN_CONDITIONAL_NET = 50_000
 PICK_TTL = 600
 OBS_RETENTION = 10 * 86400
 GAP_REVISION_GRACE = 86400
+EVALUATION_RECEIPT_GRACE = 900
 MAX_STATE_BYTES = 12_000_000
 MAX_EXPORT_BYTES = 8_000_000
 MAX_GRAPH_ITEMS = 32
@@ -820,11 +821,13 @@ def record_shadow_decision(state, rows, five, now):
             continue
         bar = five['items'][str(row['item_id'])]
         x = learning.feature_vector(bar, prior.get((row['item_id'], five['start']-300)))
-        if x is None:
-            continue
-        forecast = learning.predict(model, x)
-        scored = dict(row, research_rank_score=research_rank_score(row,forecast),
-                      ranking_mode='ML_RESEARCH_ACTIVE')
+        # Live screen keeps an otherwise eligible item on the rules score when
+        # its ML features are unavailable. Shadow compares that same fallback.
+        forecast = learning.predict(model, x) if x is not None else None
+        scored = (dict(row, research_rank_score=research_rank_score(row,forecast),
+                       ranking_mode='ML_RESEARCH_ACTIVE') if forecast is not None
+                  else dict(row, research_rank_score=row['conditional_after_tax_gp'],
+                            ranking_mode='RULES_BASELINE'))
         candidates.append((row,scored))
     def allocate(order):
         plans=[]
@@ -928,7 +931,8 @@ def sample_research_ids(rows, bucket_start, cohort_ids=None):
 def pending_pick_observation_ids(picks, decision_at):
     """Retain an issued item's prospective evaluation window, then stop sampling it."""
     return [p['item_id'] for p in picks if p.get('first_public_at') is not None and
-            decision_at < p['first_public_at'] + 60 + p['horizon_seconds'] + 3600]
+            decision_at < p['first_public_at'] + 60 + p['horizon_seconds'] +
+            3600 + EVALUATION_RECEIPT_GRACE]
 
 
 def cycle(state, client, rules, now, run_id, archive_dir=None, run_event='manual'):

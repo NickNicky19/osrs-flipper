@@ -9,7 +9,7 @@ paper-data branch and issued history. All game actions remain manual.
 
 The `codex/v3-acceptance-gaps` continuation starts from main `c864b528`.
 Its code is under review and has **not yet been merged or deployed**. Current
-Windows results: 201 Python application tests passed, 21 Node site tests
+Windows results: 202 Python application tests passed, 21 Node site tests
 passed, and `git diff --check` passed. The Python suite's localhost tests ran
 with approved host access. The correction set adds two-hour persisted research
 cohorts, more complete model provenance and fixed forward comparison gates;
@@ -17,8 +17,9 @@ shadow and active selection now use one two-side rank formula. The bounded
 simulator supports predeclared cancel/reprice events, and the site adds numeric
 history/stress summaries, recorded item allowance deduction and resilient
 publication-receipt polling. A read-only diff review found policy parity,
-replay capacity and chart-window defects; all three were corrected and covered
-by focused regressions. No real model has been trained or promoted.
+replay capacity, chart-window, missing-feature fallback and final-bucket
+receipt defects; all five were corrected and covered by focused regressions.
+No real model has been trained or promoted.
 
 The original schedule query at 23:48 UTC on 27 October was empty **at that
 time**. A new check at 21:37 UTC on 28 October found four successful

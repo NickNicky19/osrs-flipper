@@ -1,5 +1,5 @@
 import {allocatePlans, DEFAULTS, parseGp, validateSettings} from "./planner.mjs";
-import {createPortfolio, replayJournal} from "./journal-core.mjs";
+import {createPortfolio, replayJournal, recordedAllowanceUsage} from "./journal-core.mjs";
 import {appendJournalEvents, createJournal, exportJournalBackup, importJournalBackup, readJournal, requestDurableStorage} from "./journal-db.mjs";
 
 const $=id=>document.getElementById(id);
@@ -84,14 +84,18 @@ function renderPlanning(fresh){
   const c=data.coverage||{};
   coverage.textContent=`Exported ${data.screener?.length||0} mapped rows; ${c.rule_supported??"UNKNOWN"} rule supported, ${c.fresh_two_sided??"UNKNOWN"} fresh two-sided, ${c.eligible??"UNKNOWN"} research eligible. Rejection flags can overlap. Public benchmark and issued picks are unchanged.`;
   if(!fresh){summary.textContent="HISTORICAL SNAPSHOT · No current personal entry plan. Existing market observations are retained for inspection.";return;}
-  const result=allocatePlans(data.screener||[],settings,Math.floor(Date.now()/1000),{journal:journalResult});
+  const now=Math.floor(Date.now()/1000);
+  const recordedUsage=settings.useJournalCash&&journalRecord&&journalResult?
+    recordedAllowanceUsage(journalRecord.portfolio,journalRecord.events,now,journalResult):null;
+  const result=allocatePlans(data.screener||[],settings,now,
+    {journal:journalResult,allowanceUsage:recordedUsage?.usage});
   summary.textContent=(result.plans.length?`${result.plans.length} conditional plan(s). `:"No qualifying major opportunity in the supported current data. ")+
-    `${result.considered} current candidates considered; ${result.ranked??0} with positive feasible arithmetic. ${result.initialCash===undefined?"Journal cash requires reconciliation.":"Shared new cash "+gp(result.initialCash)+", remaining "+gp(result.cashRemaining)+"."} ${result.scope||""}`;
+    `${result.considered} current candidates considered; ${result.ranked??0} with positive feasible arithmetic. ${result.initialCash===undefined?"Journal cash requires reconciliation.":"Shared new cash "+gp(result.initialCash)+", remaining "+gp(result.cashRemaining)+"."} ${result.scope||""} ${recordedUsage?.scope||""}`;
   for(const plan of result.plans){
     const card=put(box,"article",plan.name+" · "+gp(plan.conditionalTotal)+" conditional net","personal-card");
     put(card,"p",`Proposed buy offer up to ${gp(plan.buy)}; proposed later sell offer ${gp(plan.sell)}. Quantity ${plan.quantity.toLocaleString()}; cash required ${gp(plan.requiredCash)}; net ${gp(plan.netPerUnit)} per unit after ${gp(plan.taxPerUnit)} tax; conditional ROI ${(plan.conditionalRoiBps/100).toFixed(2)}%.`);
     put(card,"p",`Observed instant-sell and instant-buy sides are ${Math.floor(Date.now()/1000-plan.lowTime)}s / ${Math.floor(Date.now()/1000-plan.highTime)}s old. Entry validity ends in ${Math.max(0,Math.min(plan.lowTime+300,plan.highTime+300)-Math.floor(Date.now()/1000))}s; review preference ${settings.reviewHorizonSeconds/60}m does not extend it.`);
-    put(card,"p",`Binding: ${plan.binding.join(", ")}. One-GP worse buy: ${gp(plan.oneGpAdverseBuy)}; one-GP worse sell: ${gp(plan.oneGpAdverseSell)}. Exact fills and personal allowance: UNKNOWN.`);
+    put(card,"p",`Binding: ${plan.binding.join(", ")}. One-GP worse buy: ${gp(plan.oneGpAdverseBuy)}; one-GP worse sell: ${gp(plan.oneGpAdverseSell)}; 5% lower exit: ${gp(plan.fivePercentLowerExit)}. These are arithmetic stresses, not probabilities. Exact fills and actual personal allowance: UNKNOWN.`);
     const button=put(card,"button","Record my trade (actual values required)");button.type="button";
     button.addEventListener("click",()=>{$("journal-quick-form").elements.namedItem("item").value=plan.name+" (#"+plan.itemId+")";
       $("my-trades").scrollIntoView({behavior:"smooth"});});

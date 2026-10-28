@@ -1,7 +1,9 @@
 "use strict";
 import {SnapshotPoller} from "./refresh.mjs?v=completion-v3-3";
-import {initPersonalUI,renderPersonalUI} from "./personal-ui.mjs?v=completion-v3-3";
-import {matchingReceipt,publishedAt,currentPlanEligible} from "./publication.mjs?v=completion-v3-4";
+import {initPersonalUI,renderPersonalUI} from "./personal-ui.mjs?v=completion-v3-5";
+import {matchingReceipt,publishedAt,currentPlanEligible,needsReceiptCheck} from "./publication.mjs?v=completion-v3-5";
+import {taxPerUnit} from "./planner.mjs?v=completion-v3-5";
+import {analyzeWindow} from "./history-analysis.mjs?v=completion-v3-5";
 const $ = id => document.getElementById(id);
 const gp = value => value === null || value === undefined ? "UNKNOWN" : Number(value).toLocaleString("en-US") + " GP";
 const number = value => value === null || value === undefined ? "UNKNOWN" : Number(value).toLocaleString("en-US");
@@ -55,14 +57,21 @@ function renderPicks(data, fresh) {
     add(card,"div","money",gp(p.conditional_after_tax_gp));
     add(card,"div","money-label","Conditional after-tax total if all assumed units buy and later sell");
     const grid = add(card,"div","numbers");
+    const gross=p.target_sell_offer-p.max_buy_offer;
+    const net=gross-p.tax_per_unit;
+    const oneGpSell=Math.max(1,p.target_sell_offer-1);
     [["Maximum proposed buy",gp(p.max_buy_offer)], ["Target proposed sell",gp(p.target_sell_offer)],
      ["Break-even sell",gp(p.break_even_sell)], ["Assumed quantity",number(p.quantity_assumption)],
-     ["Required shared cash",gp(p.required_cash)], ["Per-unit sale tax",gp(p.tax_per_unit)]].forEach(pair => {const cell=add(grid,"div");add(cell,"span",null,pair[0]);add(cell,"strong",null,pair[1]);});
+     ["Required shared cash",gp(p.required_cash)], ["Gross / tax / net per unit",gp(gross)+" / "+gp(p.tax_per_unit)+" / "+gp(net)],
+     ["Conditional ROI",(100*p.conditional_after_tax_gp/p.required_cash).toFixed(2)+"%"]].forEach(pair => {const cell=add(grid,"div");add(cell,"span",null,pair[0]);add(cell,"strong",null,pair[1]);});
     add(card,"p","fine","Observed instant-sell side: "+date(p.observed_low_time)+" ("+Math.max(0,Math.floor(now-p.observed_low_time))+"s old) · instant-buy side: "+date(p.observed_high_time)+" ("+Math.max(0,Math.floor(now-p.observed_high_time))+"s old)");
     add(card,"p","fine","Review horizon: "+number(p.horizon_seconds/60)+" minutes · Verified deploy: "+date(publishedAt(data,p,currentReceipt)));
     add(card,"p","fine",p.reason);
     add(card,"p","risk",p.risks.join(" "));
-    add(card,"p","fine","5% lower exit scenario: "+gp(p.stress.find(s=>s.exit_decline_bps===500)?.conditional_gp));
+    add(card,"p","fine","One-GP worse buy: "+gp((net-1)*p.quantity_assumption)+
+      " · one-GP worse sell: "+gp((oneGpSell-taxPerUnit(oneGpSell,p.tax_exempt)-p.max_buy_offer)*p.quantity_assumption)+
+      " · 5% lower exit scenario: "+gp(p.stress.find(s=>s.exit_decline_bps===500)?.conditional_gp)+
+      ". These are arithmetic stresses, not probabilities.");
   });
 }
 
@@ -166,6 +175,27 @@ function renderGraphs(data){
   add(card,"p","small","Review window: "+number(horizon/60)+" minutes · statistics use "+analysisName+" points only: "+number(valid.length)+" two-sided buckets; positive gross side difference in "+number(grossPositive)+". Lower-side average range: "+gp(lowMin)+" to "+gp(lowMax)+". These are descriptions, not a selection-policy input or executable quotes.");
   add(card,"p","small","Lowest observed lower-side bucket average: "+gp(minBucket?.low_avg)+" · reported lower-side units in that whole bucket: "+number(minBucket?.low_units)+" · exact units at that price: UNKNOWN · attainable fills: UNKNOWN.");
   add(card,"p","small","First-hand recent points: "+number(captured.length)+" (latest receipt "+date(latestCapture)+"); retrospective points: "+number(historical.length)+" (download receipt "+date(graph.received_at)+"). Source-window age: "+(newest?number(Math.max(0,Math.floor(Date.now()/1000-newest)))+" seconds":"UNKNOWN")+". Gaps break lines; downloaded history is never backdated as a prospective signal.");
+  const ruleRow=(data.screener||[]).find(r=>String(r.item_id)===selectedGraphId);
+  const range=pair=>pair?gp(pair[0])+" to "+gp(pair[1]):"UNKNOWN";
+  const activity=(a,b)=>number(a)+" → "+number(b)+" reported units (earlier / later half)";
+  for(const [label,points,resolution] of [["First-hand captured",captured,300],
+      ["Retrospective downloaded",historical,graph.resolution_seconds||3600]]){
+    if(!points.length)continue;
+    const stats=analyzeWindow(points,horizon,resolution,ruleRow?.tax_exempt);
+    add(card,"p","small",label+": "+number(stats.twoSidedBuckets)+" two-sided / "+
+      number(stats.expectedBuckets)+" expected buckets at this resolution; "+
+      number(stats.oneSidedOrMissingBuckets)+" observed one-sided or incomplete buckets. "+
+      "Lower range "+range(stats.lowRange)+"; higher range "+range(stats.highRange)+
+      "; median/minimum gross spread "+gp(stats.medianGrossSpread)+" / "+gp(stats.minimumGrossSpread)+
+      "; positive gross spread in "+number(stats.positiveGrossBuckets)+" buckets. Missing intervals reduce coverage.");
+    add(card,"p","small",label+" downside: chronological lower-side peak-to-later-trough "+
+      number(stats.chronologicalLowDownsideBps)+" basis points; lower-side range "+
+      number(stats.lowerSideRangeBps)+" basis points of its median. Side activity: lower "+
+      activity(stats.earlierLowUnits,stats.laterLowUnits)+"; higher "+
+      activity(stats.earlierHighUnits,stats.laterHighUnits)+". Five-percent lower-exit after-tax arithmetic remains positive in "+
+      number(stats.fivePercentExitStressPositiveBuckets)+" buckets "+
+      (stats.taxRuleKnown?"under the current reviewed rule.":"only when a reviewed rule exists; here tax is UNKNOWN."));
+  }
   if(!displayFresh(data))add(card,"p","risk","Historical or unverified snapshot only; current entry plans are unavailable.");
 }
 
@@ -201,13 +231,15 @@ function renderDetails(data) {
   const rd=ml.readiness||{};
   [["Mode",ml.status],["Active research model",ml.active_model_id||"RULES_BASELINE"],
    ["Candidate version",ml.model_version||"NO TRAINED MODEL"],
+   ["Candidate code commit",ml.model_code_commit||"NO TRAINED MODEL"],
+   ["Candidate rule / source route versions",(ml.model_rule_version||"UNKNOWN")+" / "+(ml.model_source_route_versions||[]).join(", ")],
    ["Target / feature schema",(ml.target_schema||"UNKNOWN")+" / "+(ml.feature_schema||"UNKNOWN")],
    ["Last readiness check",date(rd.last_check_at)],["Next bounded check",date(rd.next_due_at)],
    ["Usable finalized examples",number(rd.usable_examples)+" / "+number(rd.required_examples)],
    ["Items / decision clocks",number(rd.usable_items)+" / "+number(rd.required_items)+" items · "+number(rd.decision_clocks)+" / "+number(rd.required_decision_clocks)+" clocks"],
    ["Label coverage",number(rd.finalized_coverage_bps)+" / "+number(rd.required_coverage_bps)+" basis points"],
    ["New matured since prior generation",number(rd.new_matured_examples)+" / "+number(rd.required_new_matured)+" examples · "+number(rd.new_matured_clocks)+" / "+number(rd.required_new_clocks)+" clocks"],
-   ["Last training",date(ml.last_training_at)],["Last evaluation",date(ml.last_evaluation_at)],
+   ["Last training",date(ml.last_training_at)+" · "+number(ml.last_training_duration_ms)+" ms"],["Last evaluation",date(ml.last_evaluation_at)],
    ["Data cutoff",date(ml.latest_data_cutoff)],
    ["Shadow samples",ml.shadow?number(ml.shadow.n)+" · "+number(ml.shadow.days)+" days · "+number(ml.shadow.coverage_bps)+" bp coverage":"NOT YET OBSERVED"],
    ["Economic comparison",ml.economic_shadow_comparison?.evidence_class||"NOT YET OBSERVED"],
@@ -243,7 +275,9 @@ function main(){
   $("filter").addEventListener("change",()=>payload&&renderScreen(payload));
   $("graph-item").addEventListener("change",()=>{selectedGraphId=$("graph-item").value;if(payload)renderGraphs(payload);});
   $("graph-horizon").addEventListener("change",()=>payload&&renderGraphs(payload));
-  const poller=new SnapshotPoller({onSnapshot:data=>{payload=data;fetchError=null;renderAll();void loadMatchingReceipt(data);},
+  const poller=new SnapshotPoller({onSnapshot:data=>{const check=needsReceiptCheck(payload,data,currentReceipt);
+      payload=data;fetchError=null;renderAll();
+      if(check)void loadMatchingReceipt(data);},
     onError:(error,last)=>{fetchError=String(error?.message||error);payload=last||payload;renderAll();}});
   document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")poller.resume();});
   setInterval(()=>{if(payload)renderAll();},15000);

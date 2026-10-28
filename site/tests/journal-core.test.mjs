@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {createPortfolio,replayJournal} from "../journal-core.mjs";
+import {createPortfolio,replayJournal,recordedAllowanceUsage} from "../journal-core.mjs";
 
 const at=1_793_130_000;
 const portfolio=createPortfolio("100000000",at);
@@ -100,4 +100,20 @@ test("opening stock carries cost without inventing a post-opening purchase",()=>
   assert.equal(result.openingInventoryBasisGp,"10000");
   assert.equal(result.inventory[0].bought,"0");
   assert.throws(()=>replayJournal(p,[{...openingLot,occurredAt:at+1}]),/as-of/);
+});
+
+test("planning deducts recent recorded buys and open buy commitments without resetting on sale",()=>{
+  const now=at+100;
+  const traded=replayJournal(portfolio,[buy,gross]);
+  assert.equal(recordedAllowanceUsage(portfolio,[buy,gross],now,traded).usage[4151],5000);
+  const p=createPortfolio("10000",at);
+  const place={...base,id:"allow-place",type:"PLACE",offerId:"allow-offer",side:"BUY",quantity:"10",unitPriceGp:"100"};
+  const fill={...base,id:"allow-fill",type:"FILL",offerId:"allow-offer",quantity:"5",totalPaidGp:"500"};
+  const pending=replayJournal(p,[place,fill]);
+  assert.equal(recordedAllowanceUsage(p,[place,fill],now,pending).usage[4151],10);
+  const cancel={...base,id:"allow-cancel",type:"CANCEL",offerId:"allow-offer"};
+  const collected={...base,id:"allow-collect",type:"COLLECT",offerId:"allow-offer"};
+  const finished=replayJournal(p,[place,fill,cancel,collected]);
+  assert.equal(recordedAllowanceUsage(p,[place,fill,cancel,collected],now,finished).usage[4151],5);
+  assert.deepEqual(recordedAllowanceUsage(p,[place,fill,cancel,collected],now+4*3600,finished).usage,{});
 });

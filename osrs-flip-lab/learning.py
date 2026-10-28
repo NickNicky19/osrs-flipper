@@ -11,8 +11,12 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
+from pathlib import Path
+import subprocess
+import time
 
-VERSION = 'public-future-interval-ridge-2'
+VERSION = 'public-future-interval-ridge-3'
 FEATURE_SCHEMA = 'public-completed-5m-features-2'
 TARGET_SCHEMA = 'future-hour-side-interval-1'
 FEATURES = ('spread_bps', 'log_low_units', 'log_high_units', 'momentum_bps')
@@ -28,12 +32,25 @@ MIN_LABEL_COVERAGE_BPS = 8000
 MAX_OBSERVATIONS = 150_000
 MAX_PREDICTIONS = 10_000
 MAX_MODELS = 4
+MAX_TRAIN_SECONDS = 30
 RIDGE_FAMILY = (10.0, 30.0)
 PROMOTION = dict(min_shadow_pairs=400, min_shadow_days=7,
                  min_shadow_coverage_bps=9000, min_heldout_improvement_bps=300,
                  min_shadow_improvement_bps=500, min_positive_blocks=3,
                  min_portfolio_clocks=100, max_drawdown_worsening_bps=0,
-                 min_portfolio_equity_advantage_gp=500_000)
+                 min_portfolio_equity_advantage_gp=500_000,
+                 max_family_sign_test_p=0.05 / MAX_MODELS)
+
+
+def _code_commit():
+    candidate = os.environ.get('GITHUB_SHA', '')
+    if not candidate:
+        try:
+            candidate = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).parent,
+                                       capture_output=True, text=True, timeout=3, check=True).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            candidate = ''
+    return candidate.lower() if len(candidate) == 40 and all(c in '0123456789abcdefABCDEF' for c in candidate) else None
 
 
 def _utc(ts):
@@ -101,6 +118,33 @@ def examples(observations, cutoff):
     return sorted(result, key=lambda e: (e['decision_at'], e['item_id']))
 
 
+def label_exclusions(first, cutoff):
+    """First failing reason for each matured captured decision envelope."""
+    counts=defaultdict(int)
+    for (item,bucket),current in first.items():
+        if bucket+HORIZON_SECONDS+300>cutoff:
+            continue
+        target=first.get((item,bucket+HORIZON_SECONDS))
+        previous=first.get((item,bucket-FEATURE_LOOKBACK_SECONDS))
+        if previous is not None and previous['received_at']>current['received_at']:
+            previous=None
+        if target is None:reason='TARGET_NOT_CAPTURED'
+        elif current['received_at']<bucket+300:reason='CURRENT_NOT_COMPLETED_AT_RECEIPT'
+        elif current['received_at']+MIN_ACTION_GAP_SECONDS>bucket+HORIZON_SECONDS:
+            reason='NO_FUTURE_ACTION_GAP'
+        elif target['received_at']<bucket+HORIZON_SECONDS+300:reason='TARGET_NOT_COMPLETED_AT_RECEIPT'
+        elif feature_vector(current,previous) is None:reason='FEATURE_SIDE_OR_UNITS_UNAVAILABLE'
+        elif not all(isinstance(v,(int,float)) and v>0 and math.isfinite(v)
+                     for v in (target.get('low_avg'),target.get('high_avg'))):
+            reason='TARGET_PRICE_UNAVAILABLE'
+        elif any(type(target.get(k)) is not int or target[k]<0 for k in ('low_units','high_units')):
+            reason='TARGET_UNITS_UNAVAILABLE'
+        else:
+            continue
+        counts[reason]+=1
+    return dict(sorted(counts.items()))
+
+
 def _solve(matrix, vector):
     n = len(vector)
     a = [list(row) + [vector[i]] for i, row in enumerate(matrix)]
@@ -139,7 +183,8 @@ def _model_digest(model):
           'lambda_','seed','data_cutoff','generation','code_version',
           'feature_definitions','target','horizon_seconds','trained_at',
           'train_last_decision','validation_last_decision','holdout_first_decision',
-          'samples','metrics')
+          'samples','metrics','code_commit','rule_version','rule_sha256','source_contract_sha256',
+          'source_route_versions','dataset_range','eligibility_counts','label_exclusions','resource_use')
     return hashlib.sha256(json.dumps({k:model.get(k) for k in keys},sort_keys=True,
                                   separators=(',',':')).encode()).hexdigest()
 
@@ -203,13 +248,21 @@ def readiness_report(state, cutoff):
         last_check_at=state.get('last_learning_check') or None,
         next_due_at=(state.get('last_learning_check') or cutoff)+86400,
         generation_count=len(state.get('models',[])),max_generations=MAX_MODELS,
-        source_scope='First-seen captured completed 5m buckets for retained research items; historical downloads are excluded.')
+        max_training_seconds=MAX_TRAIN_SECONDS,
+        source_scope='First-seen captured completed 5m buckets: five highest ranked eligible items plus one persisted rotating eligible ID held for two hours when it remains eligible; one leading, the cohort ID and another leading ID receive prospective predictions. Excluded items and historical downloads are omitted; results do not generalize to the full mapped market.')
 
 
-def train_once(observations, cutoff, previous_cutoff=0, generation=0):
+def train_once(observations, cutoff, previous_cutoff=0, generation=0,
+               *, provenance=None, clock=time.time):
+    started = clock()
+    commit = _code_commit()
+    if commit is None:
+        return dict(status='PAUSED', reason='CODE_COMMIT_UNAVAILABLE')
     if len(observations) > MAX_OBSERVATIONS:
         return dict(status='PAUSED', reason='OBSERVATION_LIMIT')
     rows = examples(observations, cutoff)
+    if clock()-started>MAX_TRAIN_SECONDS:
+        return dict(status='PAUSED',reason='COMPUTE_BUDGET')
     first = _first_observations(observations, cutoff)
     matured = sum(bucket + HORIZON_SECONDS + 300 <= cutoff and
                   observation['received_at'] <= cutoff for (_, bucket), observation in first.items())
@@ -241,9 +294,28 @@ def train_once(observations, cutoff, previous_cutoff=0, generation=0):
     scale = [max(1e-9, math.sqrt(sum((r['x'][j] - mean[j]) ** 2 for r in training) / len(training))) for j in range(len(FEATURES))]
     x = [[(v - m) / s for v, m, s in zip(r['x'], mean, scale)] for r in training]
     penalty=RIDGE_FAMILY[generation % len(RIDGE_FAMILY)]
+    provenance = provenance or {}
+    available_observations=[o for o in observations if o.get('received_at',cutoff+1)<=cutoff]
     model = dict(version=VERSION, feature_schema=FEATURE_SCHEMA,target_schema=TARGET_SCHEMA,
                  generation=generation+1,features=list(FEATURES), mean=mean, scale=scale,
-                 code_version='public-pipeline-1',
+                 code_version='public-pipeline-2',
+                 code_commit=commit,
+                 rule_version=provenance.get('rule_version','UNKNOWN_DIRECT_RESEARCH'),
+                 rule_sha256=provenance.get('rule_sha256'),
+                 source_contract_sha256=provenance.get('source_contract_sha256'),
+                 source_route_versions=sorted({str(o.get('route_version','UNKNOWN_LEGACY')) for o in available_observations}),
+                 dataset_range=dict(first_decision=rows[0]['decision_at'],
+                                    last_decision=rows[-1]['decision_at'],
+                                    first_target_received=min(r['target_received_at'] for r in rows),
+                                    last_target_received=max(r['target_received_at'] for r in rows)),
+                 eligibility_counts=dict(observations=len(available_observations),matured_envelopes=matured,
+                                         usable_examples=len(rows),
+                                         skipped_or_incomplete=max(0,matured-len(rows)),
+                                         distinct_items=len({r['item_id'] for r in rows}),
+                                         distinct_decision_clocks=len(clocks)),
+                 label_exclusions=label_exclusions(first,cutoff),
+                 resource_use=dict(observations_scanned=len(available_observations),
+                                   training_rows=len(training),candidate_family_size=len(RIDGE_FAMILY)),
                  feature_definitions='spread of reported 5m side averages; log1p units on each side; prior captured low-side momentum only when available at decision clock',
                  price_weights=_fit(x, [r['y_price_bps'] for r in training],penalty),
                  units_weights=_fit(x, [r['y_log_units'] for r in training],penalty),
@@ -254,10 +326,13 @@ def train_once(observations, cutoff, previous_cutoff=0, generation=0):
                  train_last_decision=training[-1]['decision_at'], validation_last_decision=validation[-1]['decision_at'],
                  holdout_first_decision=holdout[0]['decision_at'], samples=dict(train=len(training), validation=len(validation), holdout=len(holdout)))
     model['metrics'] = dict(validation=_score(model, validation), holdout=_score(model, holdout))
+    if clock()-started>MAX_TRAIN_SECONDS:
+        return dict(status='PAUSED',reason='COMPUTE_BUDGET')
     model['checksum']=_model_digest(model)
     model['id'] = model['checksum'][:16]
     model['status'] = 'SHADOW'
-    return dict(status='ML_SHADOW', model=model)
+    return dict(status='ML_SHADOW', model=model,
+                training_duration_ms=max(0,round((clock()-started)*1000)))
 
 
 def record_predictions(state, current_rows, now):
@@ -289,11 +364,13 @@ def record_predictions(state, current_rows, now):
     return count
 
 
-def shadow_metrics(state, cutoff):
+def shadow_metrics(state, cutoff, window=None):
     first = _first_observations(state['observations'], cutoff)
     grouped = defaultdict(list)
     denominators=defaultdict(int)
     for p in state['predictions']:
+        if window is not None and not window[0] <= p['issued_at'] < window[1]:
+            continue
         if p.get('target_schema') != TARGET_SCHEMA or p['issued_at'] + MIN_ACTION_GAP_SECONDS > p['target_bucket']:
             continue
         if p['target_bucket'] + 300 > cutoff:
@@ -322,13 +399,18 @@ def shadow_metrics(state, cutoff):
         for p, actual, _, _ in pairs:
             by_day[p['issued_at'] // 86400].append((p, actual))
         positive_days = sum(sum(abs(a) - abs(a - p['forecast']['price_return_bps']) for p, a in ps) > 0 for ps in by_day.values())
+        # One predeclared look across at most four generations: an exact
+        # one-sided day-block sign test with a Bonferroni family budget.
+        days=len(by_day)
+        sign_test_p=sum(math.comb(days,k) for k in range(positive_days,days+1))/2**days
         result[model_id] = dict(n=n, days=len(by_day),coverage_bps=n*10000//max(1,denominators[model_id]),
                                 matured_issued=denominators[model_id],
                                 baseline_price_mae_bps=base, candidate_price_mae_bps=ml,
                                 baseline_high_price_mae_bps=high_base,candidate_high_price_mae_bps=high_ml,
                                 baseline_log_units_mae=units_base, candidate_log_units_mae=units_ml,
                                 baseline_high_log_units_mae=high_units_base,candidate_high_log_units_mae=high_units_ml,
-                                positive_days=positive_days, scope='captured interval statistics; no order fills')
+                                positive_days=positive_days,sign_test_p=sign_test_p,
+                                scope='captured interval statistics; no order fills')
     return result
 
 
@@ -370,19 +452,41 @@ def economic_shadow_comparison(state, cutoff):
     The interval trigger and publication delay remain unverified assumptions.
     Unknown shared allowance groups prevent automatic research promotion.
     """
-    from simulator import replay
+    from simulator import MAX_BARS, replay
     model=next((m for m in reversed(state['models']) if m['status']=='SHADOW'),None)
     if model is None:return None
-    matured=[d for d in state.get('shadow_decisions',[]) if d['model_id']==model['id'] and
-             d['issued_at']+HORIZON_SECONDS+300<=cutoff]
-    selected=sorted(matured,key=lambda d:d['issued_at'])[:100]
-    if len(selected)<100:return dict(evidence_class='DATA_INSUFFICIENT',reason='FEWER_THAN_100_MATURED_DECISION_CLOCKS',
-                                      clocks=len(selected),coverage_bps=0)
-    published=[d for d in selected if type(d.get('public_available_at')) is int and
-               d['public_available_at']>=d['issued_at']]
-    if len(published)<100:
-        return dict(evidence_class='DATA_INSUFFICIENT',reason='MISSING_VERIFIED_PUBLICATION_CLOCKS',
-                    clocks=len(selected),coverage_bps=len(published)*10000//len(selected))
+    decisions=sorted((d for d in state.get('shadow_decisions',[]) if d['model_id']==model['id']),
+                     key=lambda d:(d['issued_at'],d.get('id','')))
+    if not decisions:return dict(evidence_class='DATA_INSUFFICIENT',reason='NO_PROSPECTIVE_DECISIONS',
+                                 clocks=0,coverage_bps=0)
+    window_start=decisions[0]['issued_at']
+    window_end=window_start+PROMOTION['min_shadow_days']*86400
+    if cutoff < window_end+HORIZON_SECONDS+300:
+        return dict(evidence_class='EVALUATION_IN_PROGRESS',reason='FROZEN_SEVEN_DAY_WINDOW_OPEN',
+                    window_start=window_start,window_end=window_end,clocks=0,coverage_bps=0)
+    scoped=[d for d in decisions if window_start<=d['issued_at']<window_end]
+    issued_hours={d['issued_at']//3600 for d in scoped}
+    verified={}
+    for decision in scoped:
+        hour=decision['issued_at']//3600
+        if (type(decision.get('public_available_at')) is int and
+                decision['issued_at']<=decision['public_available_at'] and
+                decision['issued_at']+HORIZON_SECONDS+300<=cutoff):
+            verified.setdefault(hour,decision)
+    published_hours=len(verified)
+    coverage_bps=published_hours*10000//max(1,len(issued_hours))
+    if (published_hours<PROMOTION['min_portfolio_clocks'] or
+            coverage_bps<PROMOTION['min_shadow_coverage_bps'] or
+            len({d['issued_at']//86400 for d in verified.values()})<PROMOTION['min_shadow_days']):
+        return dict(evidence_class='DATA_INSUFFICIENT',reason='FROZEN_WINDOW_PUBLICATION_COVERAGE',
+                    window_start=window_start,window_end=window_end,
+                    issued_hours=len(issued_hours),published_hours=published_hours,
+                    clocks=published_hours,coverage_bps=coverage_bps)
+    hours=sorted(verified)
+    # Fixed time-stratified sample spans the full seven-day window. Choosing
+    # verified clocks occurs before reading outcomes and tolerates a few outages.
+    selected=[verified[hours[i*(len(hours)-1)//(PROMOTION['min_portfolio_clocks']-1)]]
+              for i in range(PROMOTION['min_portfolio_clocks'])]
     first=_first_observations(state['observations'],cutoff)
     items={p['item_id'] for d in selected for p in d['baseline']+d['candidate']}
     earliest=min(d['issued_at'] for d in selected)
@@ -390,7 +494,7 @@ def economic_shadow_comparison(state, cutoff):
     bars=[dict(row) for (item,bucket),row in first.items() if item in items and
           earliest<=bucket<=latest]
     bars.sort(key=lambda b:(b['bucket_start'],b['item_id']))
-    if len(bars)>12_000:return dict(evidence_class='DATA_INSUFFICIENT',reason='SIMULATION_BAR_BUDGET',
+    if len(bars)>MAX_BARS:return dict(evidence_class='DATA_INSUFFICIENT',reason='SIMULATION_BAR_BUDGET',
                                    clocks=len(selected),coverage_bps=0)
     def plans(side):
         result=[]
@@ -409,7 +513,10 @@ def economic_shadow_comparison(state, cutoff):
         return dict(evidence_class='DATA_INSUFFICIENT',reason='REPLAY_INPUT_OR_COVERAGE',clocks=len(selected),
                     coverage_bps=0)
     return dict(evidence_class='FORWARD_ASSUMPTION_SIMULATION',clocks=len(selected),
-        coverage_bps=10000,matched_capital_and_slots=True,
+        days=len({d['issued_at']//86400 for d in selected}),
+        window_start=window_start,window_end=window_end,
+        issued_hours=len(issued_hours),published_hours=published_hours,
+        coverage_bps=coverage_bps,matched_capital_and_slots=True,
         tax_and_inventory_accounted=True,
         allowance_groups_verified=all(p.get('limit_group_status')=='VERIFIED_ITEM_ONLY'
                                       for p in baseline_plans+candidate_plans),
@@ -450,6 +557,8 @@ def promotion_gate(model, shadow, portfolio):
         reasons.append('UNTOUCHED_SHADOW_LABEL_COVERAGE')
     elif shadow['candidate_price_mae_bps'] > shadow['baseline_price_mae_bps'] * (1 - PROMOTION['min_shadow_improvement_bps'] / 10000) or shadow['positive_days'] < PROMOTION['min_positive_blocks']:
         reasons.append('UNTOUCHED_SHADOW_PERFORMANCE')
+    if shadow is None or shadow.get('sign_test_p',1)>PROMOTION['max_family_sign_test_p']:
+        reasons.append('MULTIPLE_CANDIDATE_DAY_BLOCK_UNCERTAINTY')
     if shadow is not None and shadow.get('candidate_log_units_mae', math.inf) >= shadow.get('baseline_log_units_mae', -math.inf):
         reasons.append('UNTOUCHED_SHADOW_UNITS')
     if shadow is not None and (shadow.get('candidate_high_price_mae_bps',math.inf)>=shadow.get('baseline_high_price_mae_bps',-math.inf) or
@@ -457,6 +566,7 @@ def promotion_gate(model, shadow, portfolio):
         reasons.append('UNTOUCHED_SHADOW_EXIT_SIDE')
     if (not portfolio or portfolio.get('evidence_class') != 'FORWARD_ASSUMPTION_SIMULATION' or
             portfolio.get('clocks', 0) < PROMOTION['min_portfolio_clocks'] or
+            portfolio.get('days',0)<PROMOTION['min_shadow_days'] or
             portfolio.get('coverage_bps', 0) < PROMOTION['min_shadow_coverage_bps'] or
             not portfolio.get('matched_capital_and_slots') or not portfolio.get('tax_and_inventory_accounted')):
         reasons.append('MATCHED_PORTFOLIO_EVIDENCE')
@@ -495,25 +605,30 @@ def daily_readiness(state, now):
     if corrupt_detected:
         state['learning_status']='ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'RULES_BASELINE'
         return state['learning_status']
-    previous = max((m.get('data_cutoff',0) for m in state['models']
+    previous = max((max(m.get('data_cutoff',0),m.get('promotion_look_at',0),
+                        m.get('shadow_ended_at',0)) for m in state['models']
                     if type(m.get('data_cutoff')) is int),default=0)
     if any(m['status'] == 'SHADOW' for m in state['models']):
-        state['shadow_metrics'] = shadow_metrics(state, now)
-        state['portfolio_shadow_comparison'] = shadow_portfolio_comparison(state, now)
         model = next(m for m in reversed(state['models']) if m['status'] == 'SHADOW')
+        decisions=sorted((d for d in state.get('shadow_decisions',[])
+                          if d['model_id']==model['id']),key=lambda d:d['issued_at'])
+        window=(decisions[0]['issued_at'],
+                decisions[0]['issued_at']+PROMOTION['min_shadow_days']*86400) if decisions else None
+        state['shadow_metrics'] = shadow_metrics(state, now, window)
+        state['portfolio_shadow_comparison'] = shadow_portfolio_comparison(state, now)
         shadow = state['shadow_metrics'].get(model['id'])
         portfolio = state.get('portfolio_shadow_comparison')
+        economic=economic_shadow_comparison(state,now) if window and now>=window[1]+HORIZON_SECONDS+300 else None
+        state['economic_shadow_comparison']=economic
         ready = (shadow and shadow['n'] >= PROMOTION['min_shadow_pairs'] and
                  shadow['days'] >= PROMOTION['min_shadow_days'] and
                  shadow.get('coverage_bps',0) >= PROMOTION['min_shadow_coverage_bps'] and
-                 portfolio and portfolio['clocks'] >= PROMOTION['min_portfolio_clocks'])
+                 economic and economic['evidence_class']=='FORWARD_ASSUMPTION_SIMULATION')
         if ready and 'promotion_look_at' not in model:
             model['promotion_look_at'] = now
-            # A reference-price mark cannot satisfy the after-tax execution gate.
-            state['economic_shadow_comparison']=economic_shadow_comparison(state,now)
-            gate = promotion_gate(model, shadow, state.get('economic_shadow_comparison'))
+            gate = promotion_gate(model, shadow, economic)
             state['promotion_gate'] = gate
-            state['last_evaluation_at']=now
+            state['last_evaluation_at']=int(time.time())
             if gate['pass_all'] and not state.get('kill_switch'):
                 for prior_model in state['models']:
                     if prior_model.get('status')=='RESEARCH_ACTIVE':
@@ -525,6 +640,15 @@ def daily_readiness(state, now):
                 model['status'] = 'SHADOW_REJECTED'
                 state['learning_status'] = 'ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'RULES_BASELINE'
                 state['learning_reason']=dict(status=state['learning_status'],reason='PROMOTION_GATE_FAILED',details=gate['reasons'])
+        elif window and now>=window[1]+HORIZON_SECONDS+300 and 'shadow_ended_at' not in model:
+            model['shadow_ended_at']=now
+            model['status']='SHADOW_REJECTED'
+            state['last_evaluation_at']=int(time.time())
+            state['learning_status']='ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'RULES_BASELINE'
+            state['learning_reason']=dict(status=state['learning_status'],
+                reason='FROZEN_SHADOW_WINDOW_INSUFFICIENT',
+                forecast_samples=shadow['n'] if shadow else 0,
+                economic_reason=economic.get('reason') if economic else 'NO_ECONOMIC_WINDOW')
         else:
             state['learning_status'] = 'ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'ML_SHADOW'
         return state['learning_status']
@@ -543,15 +667,20 @@ def daily_readiness(state, now):
         state['learning_status'] = 'ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'PAUSED'
         state['learning_reason'] = dict(status='PAUSED',reason='MAX_REVIEWED_GENERATIONS_REACHED',max_models=MAX_MODELS)
         return state['learning_status']
-    result = train_once(state['observations'], now, previous, len(state['models']))
+    result = train_once(state['observations'], now, previous, len(state['models']),
+        provenance=dict(rule_version=state.get('latest_rule_version'),
+                        rule_sha256=state.get('latest_rule_sha256'),
+                        source_contract_sha256=state.get('latest_source_contract_sha256')))
     if result['status'] == 'ML_SHADOW':
         state['models'].append(result['model'])
         state['learning_status'] = 'ML_RESEARCH_ACTIVE' if state.get('active_model_id') else 'ML_SHADOW'
-        state['last_training_at'] = now
-        state['last_evaluation_at'] = now
+        state['last_training_at'] = int(time.time())
+        state['last_training_duration_ms'] = result['training_duration_ms']
+        state['last_evaluation_at'] = state['last_training_at']
         state['latest_data_cutoff'] = now
         state['learning_reason']=dict(status='ML_SHADOW',reason='NEW_MATURED_DATA',
             examples=sum(result['model']['samples'].values()),
+            training_duration_ms=result['training_duration_ms'],
             required_examples=MIN_EXAMPLES,required_items=MIN_ITEMS,
             required_decision_clocks=MIN_DECISION_CLOCKS,generation=result['model']['generation'])
     else:

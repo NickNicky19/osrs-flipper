@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {DEFAULTS, parseGp, validateSettings, sizeCandidate, allocatePlans} from "../planner.mjs";
-import {createPortfolio,replayJournal} from "../journal-core.mjs";
+import {createPortfolio,replayJournal,recordedAllowanceUsage} from "../journal-core.mjs";
 
 const now = 1_793_132_577;
 function row(id, buy, sell, limit, hourly) {
@@ -83,4 +83,19 @@ test("journal-linked planning cannot raise the 50m aggregate live pilot",()=>{
   const lowCash=replayJournal(createPortfolio("30000000",now-100),[]);
   const committed=allocatePlans([candidate],{...settings,documentedCommitmentsGp:5_000_000},now,{journal:lowCash});
   assert.equal(committed.initialCash,25_000_000);
+});
+
+test("recorded recent purchases reduce final personal quantity and net threshold",()=>{
+  const p=createPortfolio("500000000",now-100);
+  const events=[{id:"recorded-buy",portfolioId:"default",type:"QUICK_BUY",itemId:7,
+    itemName:"Item 7",quantity:"120",totalPaidGp:"120000",occurredAt:now-90,recordedAt:now-80}];
+  const journal=replayJournal(p,events);
+  const allowanceUsage=recordedAllowanceUsage(p,events,now,journal).usage;
+  const candidate=row(7,1000,1200,125,1250);
+  const settings={...DEFAULTS,useJournalCash:true,minTotalGp:0};
+  const result=allocatePlans([candidate],settings,now,{journal,allowanceUsage});
+  assert.equal(result.plans[0].quantity,5);
+  assert.equal(result.plans[0].conditionalTotal,880);
+  assert.equal(allocatePlans([candidate],{...settings,minTotalGp:1000},now,
+    {journal,allowanceUsage}).plans.length,0);
 });

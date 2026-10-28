@@ -1,5 +1,14 @@
 "use strict";
 
+export function requiresReceiptReload(previous,next){
+  return !previous||previous.artifact_id!==next?.artifact_id||
+    previous.artifact_run_id!==next?.artifact_run_id;
+}
+
+export function needsReceiptCheck(previous,next,receipt){
+  return requiresReceiptReload(previous,next)||!matchingReceipt(next,receipt);
+}
+
 export function matchingReceipt(data,receipt){
   return receipt&&receipt.artifact_id===data?.artifact_id&&
     receipt.deployment_id===data?.artifact_run_id&&Array.isArray(receipt.pick_ids)&&

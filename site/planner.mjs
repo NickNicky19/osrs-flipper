@@ -90,6 +90,8 @@ export function sizeCandidate(row, cash, settings, allowanceUsed = 0) {
     ruleVersion: row.rule_version, taxExempt: row.tax_exempt,
     oneGpAdverseBuy: (netPerUnit - 1) * quantity,
     oneGpAdverseSell: (sell - 1 - taxPerUnit(Math.max(1, sell - 1), row.tax_exempt) - buy) * quantity,
+    fivePercentLowerExit: (()=>{const exit=Math.max(1,Math.floor(sell*0.95));
+      return (exit-taxPerUnit(exit,row.tax_exempt)-buy)*quantity;})(),
     executionScope: "CONDITIONAL_SCENARIO_NO_FILL_INFERRED"};
 }
 
@@ -137,6 +139,6 @@ export function allocatePlans(rows, rawSettings, now, options = {}) {
     plans, smaller, cashRemaining:cash, initialCash, availableSlots,
     considered:pool.length, ranked:ranked.length, excluded,
     scope:settings.useJournalCash?
-      "Self-reported journal cash; total new research exposure held below the 50m live-pilot headroom. Manual action and personal allowances remain unverified.":
+      "Self-reported journal cash; total new research exposure held below the 50m live-pilot headroom. Recorded item purchases are deducted; actual and shared-group allowance remains unverified.":
       "Hypothetical what-if budget; greedy shared allocation. This is not a live exposure approval; personal limits and fills are unverified."};
 }

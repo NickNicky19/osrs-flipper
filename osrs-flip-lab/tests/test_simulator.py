@@ -46,6 +46,37 @@ class SimulatorTests(unittest.TestCase):
         result=replay([plan],[bar(1,1800,100,110)])
         self.assertEqual(result['status'],'DATA_INSUFFICIENT')
 
+    def test_omitted_limit_group_is_assumption_not_verified_evidence(self):
+        plan=dict(id='p1',item_id=1,issued_at=1000,entry_deadline=2100,exit_deadline=2400,
+                  buy=100,sell=120,quantity=10,public_limit=10,tax_exempt=False)
+        result=replay([plan],[bar(1,1800,100,110),bar(1,2100,110,120)],capital=10_000)
+        self.assertEqual(result['status'],'HISTORICAL_SIMULATION')
+        self.assertFalse(result['allowance_groups_verified'])
+
+    def test_cancel_after_partial_buy_keeps_stock_and_allowance(self):
+        plan=dict(id='p1',item_id=1,issued_at=1000,entry_deadline=2700,exit_deadline=3300,
+                  buy=100,sell=120,quantity=10,public_limit=10,tax_exempt=False,
+                  events=[dict(type='CANCEL_ENTRY',at=2400)])
+        result=replay([plan],[bar(1,1800,100,110),bar(1,2100,110,110),
+                              bar(1,2400,100,110),bar(1,2700,110,120),
+                              bar(1,3000,110,120)],capital=10_000)
+        self.assertEqual(result['status'],'HISTORICAL_SIMULATION')
+        self.assertEqual(result['positions'][0]['modeled_bought'],5)
+        self.assertEqual(result['positions'][0]['modeled_sold'],5)
+        self.assertEqual(result['realized_after_tax_gp'],90)
+
+    def test_reprice_only_affects_later_buckets(self):
+        plan=dict(id='p1',item_id=1,issued_at=1000,entry_deadline=2700,exit_deadline=3300,
+                  buy=99,sell=120,quantity=10,public_limit=10,tax_exempt=False,
+                  events=[dict(type='REPRICE_ENTRY',at=2200,price=100)])
+        bars=[bar(1,1800,100,110),bar(1,2100,100,110),bar(1,2400,100,110),
+              bar(1,2700,110,120),bar(1,3000,110,120)]
+        result=replay([plan],bars,capital=10_000)
+        self.assertEqual(result['status'],'HISTORICAL_SIMULATION')
+        self.assertEqual(result['positions'][0]['modeled_bought'],5)
+        self.assertEqual(result['positions'][0]['modeled_sold'],5)
+        self.assertEqual(result['realized_after_tax_gp'],90)
+
     def test_fractional_bucket_averages_and_missing_window_are_explicit(self):
         plan=dict(id='p1',item_id=1,issued_at=1000,entry_deadline=2100,exit_deadline=2400,
                   buy=100,sell=120,quantity=10,public_limit=10,tax_exempt=False)
@@ -69,6 +100,18 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(result['positions'][0]['status'],'EXPIRED_BEFORE_ACTION')
         self.assertEqual((result['modeled_bought_units'],result['modeled_sold_units']),(0,0))
         self.assertEqual(result['cash_gp'],10_000)
+
+    def test_seven_day_multi_item_replay_fits_bounded_bar_budget(self):
+        plan=dict(id='p1',item_id=1,issued_at=1000,entry_deadline=2100,
+                  exit_deadline=2400,buy=100,sell=120,quantity=10,
+                  public_limit=10,tax_exempt=False)
+        bars=[bar(item,1800+bucket*300,100 if bucket==0 else 110,
+                  120 if bucket else 110)
+              for item in range(1,8) for bucket in range(2016)]
+        self.assertGreater(len(bars),12_000)
+        result=replay([plan],bars,capital=10_000)
+        self.assertEqual(result['status'],'HISTORICAL_SIMULATION')
+        self.assertLessEqual(len(bars),20_000)
 
 
 if __name__=='__main__':unittest.main()

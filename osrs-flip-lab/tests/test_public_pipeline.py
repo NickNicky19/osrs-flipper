@@ -17,7 +17,8 @@ from core import ValidationError
 from public_pipeline import (BANKROLL, SourceClient, _parse_safe, cycle, grade_picks,
     graph_stats, issue_picks, load_state, mark_published, new_state, parse_timeseries,
     public_export, save_state, screen, compact_history, collect, _retry_delay,
-    ProviderDeferred, recover_pending_publication, verified_deploy_completed_at)
+    ProviderDeferred, recover_pending_publication, verified_deploy_completed_at,
+    sample_research_ids, pending_pick_observation_ids, record_shadow_decision, _select)
 from learning import (MIN_EXAMPLES, daily_readiness, examples, promotion_gate,
     rollback, shadow_metrics, train_once, feature_vector, predict, record_predictions,
     HORIZON_SECONDS, FEATURE_LOOKBACK_SECONDS, compatible_model,
@@ -141,6 +142,39 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertIsNone(stats['exact_units_at_price'])
         self.assertIsNone(stats['attainable_quantity'])
 
+    def test_chart_downside_is_chronological_peak_to_later_trough(self):
+        falling=graph_stats([dict(bucket_start=300,low_avg=100,high_avg=110),
+                             dict(bucket_start=600,low_avg=120,high_avg=130),
+                             dict(bucket_start=900,low_avg=60,high_avg=70)])
+        rising=graph_stats([dict(bucket_start=300,low_avg=60,high_avg=70),
+                            dict(bucket_start=600,low_avg=100,high_avg=110)])
+        self.assertEqual(falling['historical_low_drawdown_bps'],5000)
+        self.assertEqual(rising['historical_low_drawdown_bps'],0)
+
+    def test_bounded_rotation_captures_non_top_eligible_items(self):
+        rows=[dict(item_id=i,flags=[] if i!=30 else ['UNREVIEWED_RULE']) for i in range(1,41)]
+        captured=set();predicted=set()
+        first=sample_research_ids(rows,7200)
+        self.assertEqual(first,sample_research_ids(rows,7200+3600))
+        cohort=first[0][5:]
+        changed=[dict(item_id=i,flags=[] if i!=6 else ['STALE']) for i in range(1,41)]
+        self.assertIn(cohort[0],sample_research_ids(changed,7200+300,cohort)[0])
+        for bucket in range(7200,7200+40*7200,7200):
+            c,p=sample_research_ids(rows,bucket);captured.update(c);predicted.update(p)
+            self.assertLessEqual(len(c),6)
+            self.assertLessEqual(len(p),3)
+            self.assertNotIn(30,c)
+        self.assertIn(28,captured)
+        self.assertIn(28,predicted)
+
+    def test_issued_pick_sampling_stops_after_its_forward_window(self):
+        pick=dict(item_id=4151,first_public_at=1000,horizon_seconds=3600)
+        self.assertEqual(pending_pick_observation_ids([pick],8200),[4151])
+        self.assertEqual(pending_pick_observation_ids([pick],8260),[4151])
+        self.assertEqual(pending_pick_observation_ids([pick],9160),[])
+        self.assertEqual(pending_pick_observation_ids(
+            [dict(pick,first_public_at=None)],2000),[])
+
     def test_learning_fixture_cycle_deterministic_and_time_ordered(self):
         obs=observations();cutoff=max(x['received_at'] for x in obs)
         first=train_once(obs,cutoff);second=train_once(obs,cutoff)
@@ -149,6 +183,10 @@ class PublicPipelineTests(unittest.TestCase):
         model=first['model']
         self.assertLess(model['train_last_decision'],model['holdout_first_decision'])
         self.assertGreater(model['samples']['holdout'],0)
+        self.assertEqual(len(model['code_commit']),40)
+        self.assertEqual(model['dataset_range']['last_target_received'],cutoff)
+        self.assertEqual(model['eligibility_counts']['usable_examples'],len(examples(obs,cutoff)))
+        self.assertIn('UNKNOWN_LEGACY',model['source_route_versions'])
         future=copy.deepcopy(obs)
         future.append(dict(obs[0],received_at=cutoff+100,low_avg=999999,capture_hash='later-revision'))
         self.assertEqual(train_once(future,cutoff)['model']['id'],model['id'])
@@ -357,26 +395,97 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertEqual(daily_readiness(state,state['created_at']+86400),'RULES_BASELINE')
         self.assertIsNone(state['active_model_id'])
 
+    def test_research_rank_uses_future_exit_side_and_cannot_reward_low_only(self):
+        contract=SourceContract(api_version='v2')
+        parsed=lambda kind: _parse_safe(kind,json.dumps(SAMPLE[kind]).encode(),NOW,contract)
+        mapping=parsed('mapping')['items']
+        latest_body=copy.deepcopy(SAMPLE['latest'])
+        latest_body['data']['4151'].update(low=1_000_000,high=1_200_000,
+                                          lowTime=NOW-20,highTime=NOW-20)
+        latest=_parse_safe('latest',json.dumps(latest_body).encode(),NOW,contract)
+        five=parsed('5m')
+        hour=parsed('1h')
+        rules=dict(version='public-rules-1',ordinary_ids=[4151],exempt_ids=[])
+        with patch('learning.predict',return_value=dict(price_return_bps=1000,
+                high_price_return_bps=-5000)):
+            rows=screen(mapping,latest,five,hour,rules,NOW,active_model={})
+        chosen=next(r for r in rows if r['item_id']==4151)
+        self.assertEqual(chosen['ranking_mode'],'ML_RESEARCH_ACTIVE')
+        self.assertLess(chosen['research_rank_score'],0)
+        state=new_state(NOW);state['source_status']='CAPTURED_WITH_REVIEW'
+        self.assertEqual(issue_picks(state,rows,NOW,[dict(sha256='fixture')]),[])
+
+    def test_shadow_candidate_is_exact_active_research_selection(self):
+        start=(NOW//3600)*3600
+        now=start+400
+        mapping={str(item):dict(name=f'Fixture {item}',members=True,public_limit=limit)
+                 for item,limit in ((4151,70),(26219,8))}
+        latest=dict(items={str(item):dict(low=low,high=high,low_time=now-20,
+                    high_time=now-20) for item,low,high in
+                    ((4151,1_000_000,1_200_000),(26219,12_000_000,12_700_000))})
+        five=dict(start=start,end=start+300,items={str(item):dict(low_avg=low,
+                  high_avg=high,low_units=200,high_units=200) for item,low,high in
+                  ((4151,1_000_000,1_200_000),(26219,12_000_000,12_700_000))})
+        hour=dict(end=start,items={str(item):dict(low_units=200,high_units=200)
+                   for item in (4151,26219)})
+        rules=dict(version='public-rules-1',ordinary_ids=[4151,26219],exempt_ids=[])
+        model=dict(id='fixture',status='SHADOW')
+        state=new_state(now);state['source_status']='CAPTURED_WITH_REVIEW'
+        state['models']=[model]
+        forecast=dict(price_return_bps=1000,high_price_return_bps=0)
+        with patch('learning.predict',return_value=forecast):
+            baseline_rows=screen(mapping,latest,five,hour,rules,now)
+            self.assertTrue(record_shadow_decision(state,baseline_rows,five,now))
+            active_rows=screen(mapping,latest,five,hour,rules,now,active_model=model)
+        comparison=state['shadow_decisions'][-1]
+        selected=_select(active_rows,dict(kill_switch=False,public_pause=False,
+                                          paper_cash=BANKROLL),now,[])
+        self.assertEqual([(p['item_id'],p['quantity']) for p in comparison['candidate']],
+                         [(r['item_id'],qty) for r,qty,_ in selected])
+        self.assertEqual(comparison['baseline'][0]['item_id'],26219)
+        self.assertEqual(comparison['candidate'][0]['item_id'],4151)
+
+    def test_shadow_keeps_rules_fallback_when_forecast_features_missing(self):
+        start=(NOW//3600)*3600
+        now=start+400
+        row=dict(item_id=4151,flags=[],legacy_baseline_supported=True,
+                 observed_instant_sell_low=1_000_000,observed_instant_buy_high=1_200_000,
+                 low_time=now-20,high_time=now-20,quantity_assumption=10,
+                 required_cash=10_000_000,conditional_after_tax_gp=1_760_000,
+                 public_limit=70,tax_exempt=False,limit_group_status='ITEM_ONLY_ASSUMED',
+                 research_rank_score=1_760_000,ranking_mode='RULES_BASELINE')
+        five=dict(start=start,items={'4151':dict(low_avg=None,high_avg=1_200_000,
+                   low_units=200,high_units=200)})
+        state=new_state(now);state['source_status']='CAPTURED_WITH_REVIEW'
+        state['models']=[dict(id='fixture',status='SHADOW')]
+        self.assertTrue(record_shadow_decision(state,[row],five,now))
+        decision=state['shadow_decisions'][-1]
+        self.assertEqual(decision['baseline'],decision['candidate'])
+        self.assertEqual(decision['candidate'][0]['item_id'],4151)
+
     def test_verified_deployment_clock_allows_bounded_shadow_replay(self):
         obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']
         model['status']='SHADOW';start=(NOW//3600)*3600
         state=new_state(start);state['models']=[model]
         state['shadow_decisions']=[];state['observations']=[]
-        for i in range(100):
+        for i in range(168):
             issued=start+i*3600
             plan=dict(item_id=1,buy=100,sell=120,quantity=10,
                       entry_deadline=issued+600,public_limit=10,tax_exempt=False,
                       limit_group_status='VERIFIED_ITEM_ONLY')
             state['shadow_decisions'].append(dict(model_id=model['id'],issued_at=issued,
-                public_available_at=issued+30,capital=BANKROLL,slots=4,
+                public_available_at=None if i==10 else issued+30,capital=BANKROLL,slots=4,
                 baseline=[plan],candidate=[plan]))
-        for bucket in range(start,start+100*3600,300):
+        for bucket in range(start,start+168*3600,300):
             state['observations'].append(dict(item_id=1,bucket_start=bucket,
                 received_at=bucket+300,low_avg=100,high_avg=120,low_units=100,
                 high_units=100,source='CAPTURED_5M',capture_hash='fixture'))
-        result=economic_shadow_comparison(state,start+100*3600+300)
+        result=economic_shadow_comparison(state,start+168*3600+3600+300)
         self.assertEqual(result['evidence_class'],'FORWARD_ASSUMPTION_SIMULATION')
         self.assertEqual(result['clocks'],100)
+        self.assertGreaterEqual(result['days'],7)
+        self.assertEqual(result['published_hours'],167)
+        self.assertGreaterEqual(result['coverage_bps'],9900)
         self.assertGreater(result['baseline_modeled_sold_units'],0)
         self.assertFalse(promotion_gate(model,None,result)['pass_all'])
 
@@ -390,24 +499,49 @@ class PublicPipelineTests(unittest.TestCase):
         self.assertIsNone(state['active_model_id'])
         self.assertEqual(state['learning_status'],'RULES_BASELINE')
 
+    def test_four_candidate_family_blocks_favorable_point_estimate_without_day_evidence(self):
+        obs=observations();model=train_once(obs,max(x['received_at'] for x in obs))['model']
+        shadow=dict(n=400,days=7,coverage_bps=9500,positive_days=7,sign_test_p=.02,
+                    baseline_price_mae_bps=100,candidate_price_mae_bps=80,
+                    baseline_log_units_mae=1,candidate_log_units_mae=.8,
+                    baseline_high_price_mae_bps=100,candidate_high_price_mae_bps=80,
+                    baseline_high_log_units_mae=1,candidate_high_log_units_mae=.8)
+        result=promotion_gate(model,shadow,dict(evidence_class='FORWARD_ASSUMPTION_SIMULATION',
+            clocks=100,days=7,coverage_bps=9500,matched_capital_and_slots=True,
+            tax_and_inventory_accounted=True,allowance_groups_verified=True,
+            baseline_terminal_equity_gp=500_000_000,candidate_terminal_equity_gp=501_000_000,
+            baseline_after_tax_realized_gp=100_000,candidate_after_tax_realized_gp=200_000,
+            baseline_modeled_sold_units=1,candidate_modeled_sold_units=1,drawdown_worsening_bps=0))
+        self.assertFalse(result['pass_all'])
+        self.assertIn('MULTIPLE_CANDIDATE_DAY_BLOCK_UNCERTAINTY',result['reasons'])
+
+    def test_training_wall_budget_stops_before_fitting(self):
+        obs=observations();cutoff=max(x['received_at'] for x in obs)
+        ticks=iter([0,31])
+        result=train_once(obs,cutoff,clock=lambda:next(ticks))
+        self.assertEqual((result['status'],result['reason']),('PAUSED','COMPUTE_BUDGET'))
+
     def test_research_policy_is_versioned_and_promotion_is_reversible(self):
         now=NOW;state=new_state(now);state['source_status']='CAPTURED_WITH_REVIEW'
         row=valid_row(1,now);row['ranking_mode']='ML_RESEARCH_ACTIVE'
         research=issue_picks(state,[row],now,[dict(sha256='abc')])[0]
-        self.assertEqual(research['policy'],'ml-research-rank-1')
+        self.assertEqual(research['policy'],'ml-research-rank-2')
         baseline_state=new_state(now);baseline_state['source_status']='CAPTURED_WITH_REVIEW'
         baseline=issue_picks(baseline_state,[valid_row(1,now)],now,[dict(sha256='abc')])[0]
         self.assertEqual(baseline['policy'],'rules-baseline-1')
+        self.assertEqual(baseline['evidence_capsule']['source_captures'][0]['sha256'],'abc')
+        self.assertEqual(baseline['evidence_capsule']['raw_payload_retention_days'],7)
         self.assertNotEqual(research['id'],baseline['id'])
         obs=observations();cutoff=max(o['received_at'] for o in obs)
         model=train_once(obs,cutoff)['model'];model['status']='SHADOW'
         promotion=new_state(cutoff);promotion['source_status']='CAPTURED_WITH_REVIEW'
         promotion['models']=[model];promotion['last_learning_check']=cutoff
+        promotion['shadow_decisions']=[dict(model_id=model['id'],issued_at=cutoff+300)]
         with (patch('learning.shadow_metrics',return_value={model['id']:{'n':400,'days':7,'coverage_bps':9500}}),
               patch('learning.shadow_portfolio_comparison',return_value={'clocks':100}),
               patch('learning.economic_shadow_comparison',return_value={'evidence_class':'FORWARD_ASSUMPTION_SIMULATION'}),
               patch('learning.promotion_gate',return_value={'pass_all':True,'reasons':[]})):
-            self.assertEqual(daily_readiness(promotion,cutoff+86400),'ML_RESEARCH_ACTIVE')
+            self.assertEqual(daily_readiness(promotion,cutoff+8*86400),'ML_RESEARCH_ACTIVE')
         self.assertEqual(promotion['active_model_id'],model['id'])
         self.assertEqual(model['status'],'RESEARCH_ACTIVE')
         rollback(promotion)
@@ -424,12 +558,14 @@ class PublicPipelineTests(unittest.TestCase):
             baseline_high_price_mae_bps=100,candidate_high_price_mae_bps=80,
             baseline_high_log_units_mae=1,candidate_high_log_units_mae=.8,positive_days=7)
         reference=dict(evidence_class='REFERENCE_MARK_NO_FILLS',clocks=100,coverage_bps=9500)
+        state['shadow_decisions']=[dict(model_id=first_id,issued_at=cutoff+300)]
         with (patch('learning.shadow_metrics',return_value={first_id:good_shadow}),
-              patch('learning.shadow_portfolio_comparison',return_value=reference)):
-            self.assertEqual(daily_readiness(state,cutoff+86400),'RULES_BASELINE')
+              patch('learning.shadow_portfolio_comparison',return_value=reference),
+              patch('learning.economic_shadow_comparison',return_value=reference)):
+            self.assertEqual(daily_readiness(state,cutoff+8*86400),'RULES_BASELINE')
         self.assertEqual(state['models'][0]['status'],'SHADOW_REJECTED')
-        self.assertIn('MATCHED_PORTFOLIO_EVIDENCE',state['promotion_gate']['reasons'])
-        state['observations']=observations(buckets=500)
+        self.assertEqual(state['learning_reason']['reason'],'FROZEN_SHADOW_WINDOW_INSUFFICIENT')
+        state['observations']=observations(buckets=500,start=cutoff+8*86400)
         second_time=max(o['received_at'] for o in state['observations'])
         self.assertEqual(daily_readiness(state,second_time+2*86400),'ML_SHADOW')
         self.assertEqual(len(state['models']),2)

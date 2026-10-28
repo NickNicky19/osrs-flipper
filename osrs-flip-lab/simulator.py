@@ -12,9 +12,9 @@ import json
 import math
 from pathlib import Path
 
-VERSION='interval-cross-participation-1'
+VERSION='interval-cross-participation-2'
 MAX_PLANS=500
-MAX_BARS=12_000
+MAX_BARS=20_000
 MAX_SPAN=31*86400
 
 
@@ -43,7 +43,8 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
         collection_delay_seconds=collection_delay,participation_bps=participation_bps,
         max_position_gp=max_position_gp,allow_expired_no_action=allow_expired_no_action,
         trigger='Preplaced order receives up to the stated fraction of whole-bucket reported units only when the relevant bucket average crosses its limit. This is a hypothetical rule, not an observed fill or queue estimate.',
-        allowance='Per-item public four-hour rolling window from first simulated purchase. ASSUMED_ITEM_ONLY is a sensitivity case and cannot satisfy a promotion-grade shared-limit gate.')
+        allowance='Per-item public four-hour rolling window from first simulated purchase. ASSUMED_ITEM_ONLY is a sensitivity case and cannot satisfy a promotion-grade shared-limit gate.',
+        changes='Optional predeclared cancellation/reprice events take effect at the first bucket starting at or after their timestamp; a cancelled entry does not erase purchased stock or reset allowance.')
     if (not isinstance(plans,list) or not isinstance(bars,list) or len(plans)>MAX_PLANS or len(bars)>MAX_BARS or
             not _integer(capital,True) or not _integer(max_slots,True) or max_slots>4 or
             not all(_integer(x) and x<=7200 for x in (publication_delay,action_delay,collection_delay)) or
@@ -67,13 +68,23 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
                 type(p['tax_exempt']) is not bool or p['entry_deadline']<=p['issued_at'] or
                 p['exit_deadline']<p['entry_deadline'] or
                 ('activation_at' in p and (not _integer(p['activation_at'],True) or p['activation_at']<p['issued_at'])) or
-                p.get('limit_group_status','VERIFIED_ITEM_ONLY') not in ('VERIFIED_ITEM_ONLY','ASSUMED_ITEM_ONLY')):
+                p.get('limit_group_status','ASSUMED_ITEM_ONLY') not in ('VERIFIED_ITEM_ONLY','ASSUMED_ITEM_ONLY')):
             return dict(status='DATA_INSUFFICIENT',reason='UNVERIFIED_PLAN_OR_ALLOWANCE',assumptions=assumptions)
+        events=p.get('events',[])
+        if (not isinstance(events,list) or len(events)>12 or any(
+                not isinstance(e,dict) or set(e)-{'type','at','price'} or
+                e.get('type') not in ('CANCEL_ENTRY','CANCEL_EXIT','REPRICE_ENTRY','REPRICE_EXIT') or
+                not _integer(e.get('at'),True) or not p['issued_at']<=e['at']<=p['exit_deadline'] or
+                (e['type'].startswith('REPRICE') and not _integer(e.get('price'),True)) or
+                (e['type'].startswith('CANCEL') and 'price' in e)
+                for e in events)):
+            return dict(status='DATA_INSUFFICIENT',reason='INVALID_PLAN_CHANGE_EVENTS',assumptions=assumptions)
         ids.add(p['id'])
         positions.append(dict(plan=p,index=index,activation=p.get('activation_at',p['issued_at']+publication_delay+action_delay),
             status='PENDING',reserved_gp=0,entry_remaining=p['quantity'],entry_limit=p['quantity'],
             held=0,held_cost=0,last_entry_bucket=None,bought=0,sold=0,realized=0,
-            entry_buckets=0,exit_buckets=0))
+            entry_buckets=0,exit_buckets=0,buy_limit=p['buy'],sell_limit=p['sell'],
+            exit_cancelled=False,next_event=0,events=sorted(events,key=lambda e:e['at'])))
     first_bars={}
     for b in sorted(bars,key=lambda row:(row.get('received_at',0),row.get('bucket_start',0))):
         if (not isinstance(b,dict) or not all(_integer(b.get(k),True) for k in ('item_id','bucket_start','received_at')) or
@@ -110,6 +121,28 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
         claimable=[x for x in claimable if x[0]>bucket]
         for pos in positions:
             p=pos['plan']
+            while pos['next_event']<len(pos['events']) and pos['events'][pos['next_event']]['at']<=bucket:
+                event=pos['events'][pos['next_event']];pos['next_event']+=1
+                kind=event['type']
+                if kind=='CANCEL_ENTRY' and pos['status'] in ('PENDING','ACTIVE'):
+                    cash+=pos['reserved_gp'];pos['reserved_gp']=0;pos['entry_remaining']=0
+                    pos['status']='OPEN_STOCK' if pos['held'] else 'CANCELLED_ENTRY'
+                elif kind=='REPRICE_ENTRY' and pos['status'] in ('PENDING','ACTIVE'):
+                    next_price=event['price']
+                    if pos['status']=='ACTIVE':
+                        desired=pos['entry_remaining']*next_price
+                        difference=desired-pos['reserved_gp']
+                        if difference>cash or pos['held_cost']+desired>max_position_gp:
+                            return dict(status='DATA_INSUFFICIENT',reason='REPRICE_EXCEEDS_CASH_OR_POSITION_CAP',
+                                        assumptions=assumptions)
+                        cash-=difference;pos['reserved_gp']=desired
+                    pos['buy_limit']=next_price
+                elif kind=='CANCEL_EXIT':
+                    pos['exit_cancelled']=True
+                elif kind=='REPRICE_EXIT':
+                    pos['sell_limit']=event['price'];pos['exit_cancelled']=False
+        for pos in positions:
+            p=pos['plan']
             if pos['status']=='ACTIVE' and bucket+300>p['entry_deadline']:
                 cash+=pos['reserved_gp'];pos['reserved_gp']=0
                 pos['entry_remaining']=0
@@ -120,9 +153,9 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
             if pos['status']!='PENDING' or bucket<pos['activation'] or bucket+300>p['entry_deadline']:
                 continue
             if active_count>=max_slots:continue
-            qty=min(p['quantity'],p['public_limit'],max_position_gp//p['buy'],cash//p['buy'])
+            qty=min(p['quantity'],p['public_limit'],max_position_gp//pos['buy_limit'],cash//pos['buy_limit'])
             if qty<1:continue
-            reserve=qty*p['buy'];cash-=reserve;pos['reserved_gp']=reserve
+            reserve=qty*pos['buy_limit'];cash-=reserve;pos['reserved_gp']=reserve
             pos['entry_limit']=qty;pos['entry_remaining']=qty;pos['status']='ACTIVE';active_count+=1
         # Existing sell offers get a separate later bucket. Claimable proceeds do not fund this bucket's buys.
         for b in batch:
@@ -132,7 +165,7 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
                 p=pos['plan']
                 if (p['item_id']!=item or pos['held']<1 or pos['status'] not in ('ACTIVE','OPEN_STOCK') or
                         pos['last_entry_bucket'] is None or bucket<=pos['last_entry_bucket'] or bucket+300>p['exit_deadline'] or
-                        not _price(b.get('high_avg')) or b['high_avg']<p['sell'] or
+                        pos['exit_cancelled'] or not _price(b.get('high_avg')) or b['high_avg']<pos['sell_limit'] or
                         not _integer(b.get('high_units'))):
                     continue
                 capacity=max(0,b['high_units']*participation_bps//10000-capacity_used[(item,bucket,'high')])
@@ -140,7 +173,7 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
                 if qty<1:continue
                 cost=pos['held_cost']*qty//pos['held']
                 pos['held']-=qty;pos['held_cost']-=cost;pos['sold']+=qty;pos['exit_buckets']+=1
-                net=qty*(p['sell']-_tax(p['sell'],p['tax_exempt']))
+                net=qty*(pos['sell_limit']-_tax(pos['sell_limit'],p['tax_exempt']))
                 pos['realized']+=net-cost;claimable.append((bucket+collection_delay,net))
                 capacity_used[(item,bucket,'high')]+=qty
                 if pos['held']==0 and pos['entry_remaining']==0 and pos['reserved_gp']==0:pos['status']='CLOSED'
@@ -149,15 +182,15 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
             for pos in positions:
                 p=pos['plan']
                 if (p['item_id']!=item or pos['status']!='ACTIVE' or pos['entry_remaining']<1 or bucket+300>p['entry_deadline'] or
-                        not _price(b.get('low_avg')) or b['low_avg']>p['buy'] or
+                        not _price(b.get('low_avg')) or b['low_avg']>pos['buy_limit'] or
                         not _integer(b.get('low_units'))):
                     continue
                 window=allowance.get(item)
                 if window is None or bucket>=window[0]+4*3600:window=[bucket,0];allowance[item]=window
                 capacity=max(0,b['low_units']*participation_bps//10000-capacity_used[(item,bucket,'low')])
-                qty=min(pos['entry_remaining'],capacity,p['public_limit']-window[1],pos['reserved_gp']//p['buy'])
+                qty=min(pos['entry_remaining'],capacity,p['public_limit']-window[1],pos['reserved_gp']//pos['buy_limit'])
                 if qty<1:continue
-                spent=qty*p['buy'];pos['reserved_gp']-=spent;pos['entry_remaining']-=qty
+                spent=qty*pos['buy_limit'];pos['reserved_gp']-=spent;pos['entry_remaining']-=qty
                 pos['held']+=qty;pos['held_cost']+=spent;pos['bought']+=qty;pos['entry_buckets']+=1
                 pos['last_entry_bucket']=bucket;window[1]+=qty;capacity_used[(item,bucket,'low')]+=qty
                 if pos['entry_remaining']==0:
@@ -193,7 +226,7 @@ def replay(plans, bars, *, capital=500_000_000, max_slots=4,
                       terminal-latest_mark[p['plan']['item_id']][0]>900) for p in positions)
     uncertain_mark=None if missing_mark else sum(_mark_gp(p['held'],latest_mark[p['plan']['item_id']][1]) for p in positions)
     return dict(status='HISTORICAL_SIMULATION',evidence_class='HISTORICAL_SIMULATION',
-        assumptions=assumptions,allowance_groups_verified=all(p['plan'].get('limit_group_status','VERIFIED_ITEM_ONLY')=='VERIFIED_ITEM_ONLY' for p in positions),
+        assumptions=assumptions,allowance_groups_verified=all(p['plan'].get('limit_group_status','ASSUMED_ITEM_ONLY')=='VERIFIED_ITEM_ONLY' for p in positions),
         realized_after_tax_gp=realized,cash_gp=cash,claimable_gp=claim,
         modeled_bought_units=sum(p['bought'] for p in positions),
         modeled_sold_units=sum(p['sold'] for p in positions),

@@ -249,3 +249,29 @@ export function replayJournal(portfolio,rawEvents) {
     fullyReconciled:cash>=0n&&warnings.every(w=>!w.startsWith("PRICE_CHANGE")),
     warnings,scope:"Self-reported records on this browser; not complete game-account equity."};
 }
+
+// Conservative self-reported usage over the last four hours. The game's
+// actual remaining allowance and any shared variant group stay UNKNOWN.
+export function recordedAllowanceUsage(portfolio,rawEvents,now,replayed=null) {
+  if(!Number.isSafeInteger(now)||now<1)throw new Error("Allowance clock required.");
+  const result=replayed??replayJournal(portfolio,rawEvents);
+  if(result.portfolioId!==portfolio.id)throw new Error("Journal and allowance portfolio differ.");
+  const events=[...new Map(rawEvents.map(e=>[e.id,e])).values()];
+  const voided=new Set(events.filter(e=>e.type==="CORRECTION").map(e=>e.targetEventId));
+  const valid=events.filter(e=>e.type!=="CORRECTION"&&!voided.has(e.id));
+  const buyOffers=new Map(valid.filter(e=>e.type==="PLACE"&&e.side==="BUY").map(e=>[e.offerId,e.itemId]));
+  const usage={};
+  const add=(itemId,quantity)=>{const next=(usage[itemId]??0)+Number(quantity);
+    if(!Number.isSafeInteger(next))throw new Error("Recorded allowance exceeds exact integer range.");
+    usage[itemId]=next;};
+  for(const event of valid){
+    if(event.occurredAt<=now-4*3600||event.occurredAt>now)continue;
+    if(event.type==="QUICK_BUY")add(event.itemId,event.quantity);
+    if(event.type==="FILL"&&buyOffers.has(event.offerId))add(buyOffers.get(event.offerId),event.quantity);
+  }
+  for(const offer of result.activeOffers){
+    if(offer.side==="BUY"&&offer.status==="OPEN")
+      add(offer.itemId,BigInt(offer.quantity)-BigInt(offer.filled));
+  }
+  return {usage,scope:"Self-reported last-four-hour buys plus remaining open buy offers; conservative item-only deduction. External and shared-group usage is UNKNOWN."};
+}

@@ -32,7 +32,7 @@ import learning
 ROOT = Path(__file__).resolve().parent
 SCHEMA = 'osrs-public-paper-1'
 POLICY = 'rules-baseline-1'
-RESEARCH_POLICY = 'ml-research-rank-1'
+RESEARCH_POLICY = 'ml-research-rank-2'
 HOST = 'prices.runescape.wiki'
 BANKROLL = 500_000_000
 LIVE_PILOT_CEILING = 50_000_000
@@ -42,6 +42,7 @@ MIN_CONDITIONAL_NET = 50_000
 PICK_TTL = 600
 OBS_RETENTION = 10 * 86400
 GAP_REVISION_GRACE = 86400
+EVALUATION_RECEIPT_GRACE = 900
 MAX_STATE_BYTES = 12_000_000
 MAX_EXPORT_BYTES = 8_000_000
 MAX_GRAPH_ITEMS = 32
@@ -51,9 +52,11 @@ MAX_INLINE_RETRY_SECONDS = 8
 MAX_FETCH_WALL_SECONDS = 90
 MAX_RAW_TOTAL = 18_000_000
 MAX_SAFE_INTEGER = 2**53 - 1
-VERSION = 'public-pipeline-1'
+VERSION = 'public-pipeline-2'
 OPTIONAL_STATE_KEYS = {'hourly', 'hourly_at', 'last_24h_at', 'daily_volume', 'data_gap',
                        'history_errors', 'learning_reason', 'latest_screen',
+                       'latest_source_contract_sha256', 'latest_rule_sha256',
+                       'last_training_duration_ms',
                        'latest_screen_at', 'latest_capture_hashes', 'chart_budget_day',
                        'chart_budget_used', 'recent_revision_bucket', 'last_revision_scan_at',
                        'route_counts'}
@@ -78,6 +81,7 @@ def new_state(now=None):
                 mapping=None, mapping_at=0, last_5m_bucket=None,
                 history_cache={},
                 chart_budget_day=now//86400, chart_budget_used=0,
+                research_cohort_index=None, research_cohort_ids=[],
                 last_source_success_at=None, last_run_at=None, run_ids=[],
                 last_run_id=None,
                 latest_rule_version=None,
@@ -512,18 +516,45 @@ def graph_stats(points):
     low_units = [p['low_units'] for p in valid if type(p.get('low_units')) is int]
     high_units = [p['high_units'] for p in valid if type(p.get('high_units')) is int]
     minimum = min(valid, key=lambda p: p['low_avg'])
+    peak = 0
+    max_downside_bps = 0
+    for point in sorted(valid, key=lambda p: p['bucket_start']):
+        peak = max(peak, point['low_avg'])
+        max_downside_bps = max(max_downside_bps,
+                               round(10000 * (peak - point['low_avg']) / peak))
     return dict(coverage=len(valid), lowest_low_average=minimum['low_avg'],
                 low_bucket_start=minimum['bucket_start'], low_bucket_units=minimum.get('low_units'),
                 exact_units_at_price=None, attainable_quantity=None,
                 low_p10=lows[int((len(lows) - 1) * .1)], low_median=lows[len(lows)//2],
                 high_p10=highs[int((len(highs)-1)*.1)], high_median=highs[len(highs)//2],
                 median_spread=spreads[len(spreads)//2],
-                historical_low_drawdown_bps=round(10000*(minimum['low_avg']/max(valid,key=lambda p:p['bucket_start'])['low_avg']-1)),
+                historical_low_drawdown_bps=max_downside_bps,
                 reported_low_units=sum(low_units) if low_units else None,
                 reported_high_units=sum(high_units) if high_units else None,
                 first_bucket=min(p['bucket_start'] for p in valid),
                 last_bucket=max(p['bucket_start'] for p in valid),
                 note='Bucket averages and whole-bucket units; exact-price units and attainable fills are UNKNOWN.')
+
+
+def research_rank_score(row, forecast):
+    """One versioned two-side stress for shadow and active research ranking."""
+    low = row['observed_instant_sell_low']
+    high = row['observed_instant_buy_high']
+    quantity = row['quantity_assumption']
+    conditional = row['conditional_after_tax_gp']
+    if not low or not high or not quantity or conditional is None or row['tax_exempt'] is None:
+        return None
+    future_low = max(1, round(low*(1+forecast['price_return_bps']/10000)))
+    future_high = max(1, round(high*(1+forecast['high_price_return_bps']/10000)))
+    stressed_buy = max(low, future_low)
+    future_net = (future_high-tax_per_unit(future_high,row['tax_exempt'])-stressed_buy)*quantity
+    # A cheaper predicted entry never increases the current conditional value.
+    return min(conditional, future_net)
+
+
+def _research_sort_key(row):
+    score = row.get('research_rank_score')
+    return (bool(row['flags']), -(score if score is not None else -1), row['item_id'])
 
 
 def screen(mapping, latest, five, hourly, rules, now, daily=None, active_model=None,
@@ -615,10 +646,10 @@ def screen(mapping, latest, five, hourly, rules, now, daily=None, active_model=N
             feature = learning.feature_vector(bar, previous)
             if feature is not None:
                 forecast = learning.predict(active_model, feature)
-                row['research_rank_score'] = conditional + forecast['price_return_bps'] * row['required_cash'] / 10000
+                row['research_rank_score'] = research_rank_score(row,forecast)
                 row['ranking_mode'] = 'ML_RESEARCH_ACTIVE'
         rows.append(row)
-    rows.sort(key=lambda r: (bool(r['flags']), -(r['research_rank_score'] or -1), r['item_id']))
+    rows.sort(key=_research_sort_key)
     return rows
 
 
@@ -629,7 +660,10 @@ def _select(rows, state, now, existing):
     selected, used_items = [], set()
     used_items.update(p['item_id'] for p in existing)
     for row in rows:
-        if row['flags'] or not row.get('legacy_baseline_supported', True) or row['item_id'] in used_items or len(selected) + len(existing) >= MAX_SLOTS:
+        if (row['flags'] or not row.get('legacy_baseline_supported', True) or
+                (row.get('ranking_mode')=='ML_RESEARCH_ACTIVE' and
+                 row.get('research_rank_score',row.get('conditional_after_tax_gp',0))<=0) or
+                row['item_id'] in used_items or len(selected) + len(existing) >= MAX_SLOTS):
             continue
         price = row['observed_instant_sell_low']
         qty = min(row['quantity_assumption'], available // price)
@@ -668,6 +702,13 @@ def issue_picks(state, rows, now, source_manifest):
         pick = dict(id=pick_id, parent_id=prior.get(row['item_id'], {}).get('id'), item_id=row['item_id'],
             name=row['name'], policy=pick_policy, engine=VERSION, rule_version=row.get('rule_version','public-rules-1'),
             source_hashes=[c['sha256'] for c in source_manifest], issued_at=now, first_public_at=None,
+            evidence_capsule=dict(public_limit=row.get('public_limit'),
+                limit_group_status=row.get('limit_group_status'),
+                five_low_units=row.get('five_low_units'),five_high_units=row.get('five_high_units'),
+                hour_low_units=row.get('hour_low_units'),hour_high_units=row.get('hour_high_units'),
+                source_captures=[{k:c.get(k) for k in ('kind','version','requested_at',
+                    'received_at','sha256')} for c in source_manifest],
+                raw_payload_retention_days=7),
             observed_instant_sell_low=buy, observed_instant_buy_high=sell,
             observed_low_time=row['low_time'], observed_high_time=row['high_time'],
             max_buy_offer=buy, target_sell_offer=sell, break_even_sell=break_even_price(buy,row['tax_exempt']),
@@ -676,7 +717,7 @@ def issue_picks(state, rows, now, source_manifest):
             expires_at=min(now+PICK_TTL, row['low_time']+300, row['high_time']+300), action='PAPER_NEW_ENTRY',
             status='ISSUED_NOT_YET_PUBLIC', evidence='CONDITIONAL_SCENARIO',
             reason='Recent two-sided trades, reviewed tax rule, named hourly-volume sizing cap, and feasible shared paper cash.' +
-                   (' Validated public interval forecast affects research rank only; no fill forecast.'
+                   (' Public-interval forecast stress on both sides affects research rank only; no fill forecast.'
                     if row.get('ranking_mode') == 'ML_RESEARCH_ACTIVE' else ''),
             risks=['Both sides are reported past transactions; neither is a current executable order book.',
                    'Remaining personal buy allowance and order queue depth are unknown.',
@@ -744,7 +785,8 @@ def grade_picks(state, observations, now):
     return count
 
 
-def _append_observations(state, five, capture_hash, received_at, selected_ids, provenance='CAPTURED_5M'):
+def _append_observations(state, five, capture_hash, received_at, selected_ids,
+                         provenance='CAPTURED_5M', route_version=None):
     latest = {}
     for observation in sorted(state['observations'], key=lambda o:o['received_at']):
         latest[(observation['item_id'], observation['bucket_start'])] = observation
@@ -759,7 +801,8 @@ def _append_observations(state, five, capture_hash, received_at, selected_ids, p
             state['observations'].append(dict(item_id=ident, bucket_start=five['start'],
                 low_avg=row['low_avg'], high_avg=row['high_avg'],
                 low_units=row['low_units'], high_units=row['high_units'],
-                received_at=received_at, capture_hash=capture_hash, source=provenance))
+                received_at=received_at, capture_hash=capture_hash, source=provenance,
+                route_version=route_version or 'UNKNOWN_LEGACY'))
 
 
 def record_shadow_decision(state, rows, five, now):
@@ -778,10 +821,14 @@ def record_shadow_decision(state, rows, five, now):
             continue
         bar = five['items'][str(row['item_id'])]
         x = learning.feature_vector(bar, prior.get((row['item_id'], five['start']-300)))
-        if x is None:
-            continue
-        forecast = learning.predict(model, x)
-        candidates.append((row, forecast['price_return_bps']))
+        # Live screen keeps an otherwise eligible item on the rules score when
+        # its ML features are unavailable. Shadow compares that same fallback.
+        forecast = learning.predict(model, x) if x is not None else None
+        scored = (dict(row, research_rank_score=research_rank_score(row,forecast),
+                       ranking_mode='ML_RESEARCH_ACTIVE') if forecast is not None
+                  else dict(row, research_rank_score=row['conditional_after_tax_gp'],
+                            ranking_mode='RULES_BASELINE'))
+        candidates.append((row,scored))
     def allocate(order):
         plans=[]
         for row,qty,_ in _select([row for row,_ in order],
@@ -794,16 +841,16 @@ def record_shadow_decision(state, rows, five, now):
                     limit_group_status=('VERIFIED_ITEM_ONLY' if row['limit_group_status']=='VERIFIED_ITEM_ONLY'
                                         else 'ASSUMED_ITEM_ONLY')))
         return plans
-    baseline = allocate(sorted(candidates, key=lambda pair: -pair[0]['conditional_after_tax_gp']))
-    candidate = allocate(sorted(candidates, key=lambda pair: -(pair[0]['conditional_after_tax_gp'] +
-                 pair[1]*pair[0]['required_cash']/10000)))
+    baseline = allocate(sorted(candidates,key=lambda pair:_research_sort_key(pair[0])))
+    candidate = allocate(sorted(((scored,baseline) for baseline,scored in candidates),
+                                key=lambda pair:_research_sort_key(pair[0])))
     if not baseline or not candidate:
         return False
     state['shadow_decisions'].append(dict(model_id=model['id'], run_id=state.get('last_run_id'),
         public_available_at=None, bucket_start=five['start'],
         target_bucket=five['start']+learning.HORIZON_SECONDS, issued_at=now, capital=BANKROLL, slots=MAX_SLOTS,
         baseline=baseline, candidate=candidate,
-        assumption='Candidate ranking adds forecast lower-side return basis points times acquisition cash / 10000 to conditional GP. This is a research ranking score, not expected profit. Full reference-price acquisition and a future bucket mark assume no fills or tax.'))
+        assumption='Candidate uses the same capped two-side future-interval stress rank as the active research policy; the comparator is the current active strategy, with the frozen rules baseline as fallback. This is not expected profit. Later interval-cross executions and marks are assumptions, not observed fills.'))
     return True
 
 
@@ -863,6 +910,31 @@ def _effective_now(client, fallback):
     return max(fallback, int(client.clock())) if hasattr(client, 'clock') else fallback
 
 
+def sample_research_ids(rows, bucket_start, cohort_ids=None):
+    """Keep a tiny cohort for two hours so the one-hour target can mature.
+
+    This also bounds ten days of captured observations and predictions within
+    the 12 MB durable-state limit. Rotation depends on the clock and eligible
+    IDs, never on later labels or forecast performance. A persisted cohort
+    survives changes in the eligible pool within its two-hour window.
+    """
+    eligible = [r['item_id'] for r in rows if not r['flags']]
+    pool = sorted(eligible[5:])
+    cohort = bucket_start // 7200
+    rotation = ([pool[cohort%len(pool)]] if pool else []) if cohort_ids is None else [
+        ident for ident in cohort_ids if ident in eligible][:1]
+    captured = list(dict.fromkeys(eligible[:5] + rotation))
+    predicted = list(dict.fromkeys(eligible[:1] + rotation + eligible[1:3]))[:3]
+    return captured, predicted
+
+
+def pending_pick_observation_ids(picks, decision_at):
+    """Retain an issued item's prospective evaluation window, then stop sampling it."""
+    return [p['item_id'] for p in picks if p.get('first_public_at') is not None and
+            decision_at < p['first_public_at'] + 60 + p['horizon_seconds'] +
+            3600 + EVALUATION_RECEIPT_GRACE]
+
+
 def cycle(state, client, rules, now, run_id, archive_dir=None, run_event='manual'):
     validate_state(state)
     if run_id in state['run_ids']:
@@ -872,6 +944,8 @@ def cycle(state, client, rules, now, run_id, archive_dir=None, run_event='manual
     state['last_run_at'] = now
     state['last_run_id'] = run_id
     state['latest_rule_version'] = rules['version']
+    state['latest_rule_sha256'] = digest(rules)
+    state['latest_source_contract_sha256'] = digest(client.contract.to_dict())
     state['last_run_event'] = run_event
     if run_event == 'schedule':
         state['last_automatic_run_at'] = now
@@ -952,8 +1026,13 @@ def cycle(state, client, rules, now, run_id, archive_dir=None, run_event='manual
     rows = screen(state['mapping'], data['latest'], data['5m'], data['1h'], rules, decision_at,
                   state.get('daily_volume'), active_model, feature_history)
     state['history_cache'] = {k:v for k,v in state['history_cache'].items() if decision_at-v['received_at'] < 8*86400}
-    selected_ids = [r['item_id'] for r in rows if not r['flags']][:5]
-    selected_ids += [p['item_id'] for p in state['picks'] if p['first_public_at'] and p['issued_at'] >= decision_at - OBS_RETENTION]
+    cohort_index = data['5m']['start'] // 7200
+    if state.get('research_cohort_index') != cohort_index:
+        state['research_cohort_index'] = cohort_index
+        state['research_cohort_ids'] = sample_research_ids(rows,data['5m']['start'])[0][5:]
+    selected_ids, ml_ids = sample_research_ids(
+        rows,data['5m']['start'],state.get('research_cohort_ids',[]))
+    selected_ids += pending_pick_observation_ids(state['picks'],decision_at)
     selected_ids += [p['item_id'] for d in state.get('shadow_decisions',[])
                      if d['issued_at']+learning.HORIZON_SECONDS+300>=decision_at
                      for p in d['baseline']+d['candidate']]
@@ -963,7 +1042,8 @@ def cycle(state, client, rules, now, run_id, archive_dir=None, run_event='manual
                          (key == '5m' and '?' not in c['url'] or key != '5m' and str(five['start']) in c['url'])), None)
             if meta:
                 _append_observations(state, five, meta['sha256'], meta['received_at'], set(selected_ids),
-                                     'CAPTURED_5M' if key == '5m' else 'RETROSPECTIVE_BACKFILL')
+                                     'CAPTURED_5M' if key == '5m' else 'RETROSPECTIVE_BACKFILL',
+                                     meta.get('version'))
     state['observations'] = [o for o in state['observations'] if o['bucket_start'] >= decision_at - OBS_RETENTION]
     grade_picks(state, state['observations'], decision_at)
     state['predictions'] = [p for p in state['predictions'] if p['issued_at'] >= decision_at - OBS_RETENTION]
@@ -973,14 +1053,15 @@ def cycle(state, client, rules, now, run_id, archive_dir=None, run_event='manual
     current_for_ml = [dict(item_id=item_id, bucket_start=data['5m']['start'],
                            previous=first_for_features.get((item_id, data['5m']['start']-300)),
                            **data['5m']['items'][str(item_id)])
-                      for item_id in selected_ids if str(item_id) in data['5m']['items']]
+                      for item_id in ml_ids if str(item_id) in data['5m']['items']]
     learning.record_predictions(state, current_for_ml, decision_at)
     if record_shadow_decision(state, rows, data['5m'], decision_at):
         newest=state['shadow_decisions'][-1]
         new_ids={p['item_id'] for p in newest['baseline']+newest['candidate']}
         meta=next((c for c in result['captures'] if c['kind']=='5m' and '?' not in c['url']),None)
         if meta:
-            _append_observations(state,data['5m'],meta['sha256'],meta['received_at'],new_ids,'CAPTURED_5M')
+            _append_observations(state,data['5m'],meta['sha256'],meta['received_at'],new_ids,
+                                 'CAPTURED_5M',meta.get('version'))
     issued = issue_picks(state, rows, decision_at, result['captures'])
     compact_history(state, archive_dir, decision_at)
     if state['public_pause']:
@@ -1173,10 +1254,14 @@ def public_export(state, now):
     model = next((m for m in reversed(state['models']) if m['status'] in ('SHADOW', 'RESEARCH_ACTIVE')), None)
     learning_view = dict(status=state['learning_status'], active_model_id=state['active_model_id'],
         candidate_model_id=model['id'] if model else None, model_version=model['version'] if model else None,
+        model_code_commit=model.get('code_commit') if model else None,
+        model_rule_version=model.get('rule_version') if model else None,
+        model_source_route_versions=model.get('source_route_versions') if model else None,
         feature_schema=learning.FEATURE_SCHEMA,target_schema=learning.TARGET_SCHEMA,
         readiness=learning.readiness_report(state,now),
         learning_reason=state.get('learning_reason'),
         last_training_at=state['last_training_at'], last_evaluation_at=state['last_evaluation_at'],
+        last_training_duration_ms=state.get('last_training_duration_ms'),
         latest_data_cutoff=state['latest_data_cutoff'],
         samples=model['samples'] if model else None, metrics=model['metrics'] if model else None,
         shadow=state.get('shadow_metrics', {}).get(model['id']) if model else None,

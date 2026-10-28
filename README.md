@@ -39,11 +39,14 @@ There is no guaranteed path or deadline from 500m to 1b GP.
 - `osrs-flip-lab/learning.py`: a fixed small standard-library ridge family
   for future one-hour completed lower/higher side averages and reported units.
   It uses chronological gaps, train-only transforms, bounded new generations,
-  prospective shadow records and a matched portfolio gate. It does **not**
+  prospective shadow records and a matched portfolio gate. Research rank v2
+  uses both forecast sides as a GP-denominated stress, without an expected
+  profit claim. It does **not**
   model fills, personal outcomes, or real profit.
 - `osrs-flip-lab/simulator.py`: bounded sequential historical replay under
   explicit interval-cross fill assumptions, with shared cash, slots,
-  allowances, collection delay, tax and unsold stock. Its results are separate
+  allowances, collection delay, optional predeclared cancellation/repricing,
+  tax and unsold stock. Its results are separate
   from forward paper observations and actual records.
 - `site/`: static, project-subpath-safe Pages viewer. Browser-side expiry hides
   stale plans even when GitHub misses a scheduled run. A roughly 60-second
@@ -89,16 +92,35 @@ Historical chart requests are capped at 16 per UTC day, and raw source
 responses are uploaded only once per successful UTC day or on a failed run,
 with seven-day retention. Pages artifacts expire after one day. This bounds
 artifact storage; review repository usage if hosting limits change.
+Issued picks retain compact point-in-time evidence capsules with reported
+units, public limits, route/version/hash and request/receipt clocks in the
+durable archive. Those capsules do not reproduce the complete raw response
+after its seven-day artifact retention. The full screener exports mapped rows;
+numerical graphs are bounded to 32 retained items per artifact.
 
 The fixed learner checks readiness once per day. It requires at least 240
 finalized future-hour examples, five items, 48 distinct decision clocks and
 80% label coverage. A later generation requires new mature examples and clocks.
+Its prospective sample retains the five highest ranked eligible IDs and one
+additional eligible ID chosen for a persisted two-hour cohort. Up to three
+IDs receive predictions per cycle. The cohort is held long enough to seek the
+one-hour-later label, but an item that becomes ineligible is excluded. This
+sample is deliberately much narrower than the full public screener; no model
+claim generalizes to all mapped items. The 20,000-bar replay limit covers a
+seven-day sampled comparison while preserving a finite compute bound.
 At most four reviewed candidates may be trained, one undergoing forward
 comparison at a time. It fits preprocessing on training data only, uses
 chronological gaps, then records later shadow predictions before outcomes.
 Promotion to the versioned research ranking requires predeclared lower and
 higher side price/unit gates, seven shadow days, 400 shadow pairs and a matched
 after-tax sequential portfolio comparison with validated resource assumptions.
+The economic comparison selects 100 verified hourly publication clocks across
+a fixed seven-day forward window with at least 90% issued-hour coverage. A
+missing receipt does not alone consume the one promotion look. A one-sided
+day-block sign test uses a 0.05/4 family threshold for the four-generation
+budget. A later generation needs new matured data after the prior comparison.
+The registry records code commit, rule and source-contract hashes, route
+versions, data range, exclusion counts and bounded resource use.
 Shadow replay uses the verified Pages deployment completion clock plus a
 60-second hypothetical manual-action delay. Quotes that expire before a
 complete future interval remain zero-action observations. The fixed economic
@@ -135,6 +157,9 @@ Additional commitments reduce available cash. The review window is a planning
 preference, not a quote-validity extension. The public 500m paper history is
 unchanged. Personal settings may lower position/slot caps but cannot lift the
 provisional 50m actual-pilot ceiling.
+With journal cash selected, recent recorded buys and remaining open buy
+orders conservatively reduce item-limit assumptions. External purchases and
+shared variant groups remain unknown.
 
 In **My Trades · this browser**, create an opening available-cash state and
 record any existing stock as opening lots with cost basis. Choose an exact
